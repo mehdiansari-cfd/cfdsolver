@@ -48,8 +48,8 @@
 <script type="text/babel" data-presets="react">
 const { useState, useEffect, useMemo, useRef } = React;
 
-// ---------- Canvas tube view (density field + velocity streaks) ----------
-function TubeView({ result, params, info }) {
+// ---------- Canvas tube view (density / pressure / Mach / schlieren) ----------
+function TubeView({ result, params, info, mode }) {
   const canvasRef = useRef(null);
   useEffect(() => {
     const cv = canvasRef.current;
@@ -70,14 +70,35 @@ function TubeView({ result, params, info }) {
 
     ctx.fillStyle = "#efe9d8"; ctx.fillRect(0, 0, W, H);
 
-    const N = result.x.length, rho = result.rho;
-    let minR = Infinity, maxR = -Infinity;
-    for (let i = 0; i < N; i++) { if (rho[i] < minR) minR = rho[i]; if (rho[i] > maxR) maxR = rho[i]; }
-    const range = Math.max(maxR - minR, 1e-12);
+    // Pick the scalar field to render based on mode.
+    const N = result.x.length;
+    let field, label;
+    if (mode === "pressure") { field = result.p;   label = "p"; }
+    else if (mode === "Mach")     { field = result.M;   label = "M"; }
+    else if (mode === "schlieren") {
+      // |drho/dx| with one-sided differences at the ends. Apply mild
+      // perceptual stretch (sqrt) so weak waves show up clearly.
+      const arr = new Array(N);
+      for (let i = 0; i < N; i++) {
+        const iL = Math.max(0, i - 1), iR = Math.min(N - 1, i + 1);
+        const g  = Math.abs(result.rho[iR] - result.rho[iL]);
+        arr[i] = Math.sqrt(g);
+      }
+      field = arr; label = "|drho/dx|";
+    } else { field = result.rho; label = "rho"; }
+
+    let minV = Infinity, maxV = -Infinity;
+    for (let i = 0; i < N; i++) {
+      if (field[i] < minV) minV = field[i];
+      if (field[i] > maxV) maxV = field[i];
+    }
+    const range = Math.max(maxV - minV, 1e-12);
     const cellW = tubeW / N;
     for (let i = 0; i < N; i++) {
-      const norm = (rho[i] - minR) / range;
-      const v = Math.round(247 - norm * 215);
+      const norm = (field[i] - minV) / range;
+      // For schlieren, invert (dense = dark gradient zones).
+      const t = mode === "schlieren" ? norm : norm;
+      const v = Math.round(247 - t * 215);
       ctx.fillStyle = "rgb(" + v + "," + Math.max(0, v - 6) + "," + Math.max(0, v - 18) + ")";
       ctx.fillRect(tubeX + i * cellW, tubeY, cellW + 0.6, tubeH);
     }
@@ -125,18 +146,26 @@ function TubeView({ result, params, info }) {
     ctx.textAlign = "left";  ctx.fillText("x = 0", tubeX, tubeY + tubeH + 11);
     ctx.textAlign = "right"; ctx.fillText("x = " + params.L, tubeX + tubeW, tubeY + tubeH + 11);
     ctx.textAlign = "left";
-    ctx.fillText("rho \u2208 [" + minR.toFixed(3) + ", " + maxR.toFixed(3) + "]", tubeX, tubeY - 4);
-  }, [result, params, info]);
+    ctx.fillText(label + " \u2208 [" + minV.toFixed(3) + ", " + maxV.toFixed(3) + "]", tubeX, tubeY - 4);
+  }, [result, params, info, mode]);
   return <canvas ref={canvasRef} style={{ width: "100%", height: 120, display: "block", background: "#efe9d8" }} />;
 }
 
-// ---------- SVG line plot ----------
-function Plot({ x, y, label, color }) {
+// ---------- SVG line plot (optional `exact` array overlays a dashed reference) ----------
+function Plot({ x, y, label, color, exact }) {
   const W = 360, H = 200;
   const pad = { l: 48, r: 12, t: 24, b: 28 };
   const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
   let yMin = Infinity, yMax = -Infinity;
   for (let i = 0; i < y.length; i++) { if (y[i] < yMin) yMin = y[i]; if (y[i] > yMax) yMax = y[i]; }
+  if (exact) {
+    for (let i = 0; i < exact.length; i++) {
+      if (Number.isFinite(exact[i])) {
+        if (exact[i] < yMin) yMin = exact[i];
+        if (exact[i] > yMax) yMax = exact[i];
+      }
+    }
+  }
   const yPad = Math.max((yMax - yMin) * 0.08, 1e-6);
   const yLo = yMin - yPad, yHi = yMax + yPad;
   const xMin = x[0], xMax = x[x.length - 1];
@@ -145,6 +174,12 @@ function Plot({ x, y, label, color }) {
   let path = "";
   for (let i = 0; i < x.length; i++) {
     path += (i === 0 ? "M" : "L") + toX(x[i]).toFixed(2) + " " + toY(y[i]).toFixed(2);
+  }
+  let exactPath = "";
+  if (exact) {
+    for (let i = 0; i < x.length; i++) {
+      exactPath += (i === 0 ? "M" : "L") + toX(x[i]).toFixed(2) + " " + toY(exact[i]).toFixed(2);
+    }
   }
   const fmt = v => {
     const a = Math.abs(v);
@@ -163,6 +198,9 @@ function Plot({ x, y, label, color }) {
         <line key={"h" + i} x1={pad.l} x2={pad.l + pw} y1={pad.t + f * ph} y2={pad.t + f * ph}
               stroke="#c8c0aa" strokeWidth="0.4" strokeDasharray="2 3" />
       ))}
+      {exact && (
+        <path d={exactPath} fill="none" stroke="#5a5547" strokeWidth="1.0" strokeDasharray="3 3" strokeLinejoin="round" opacity="0.85" />
+      )}
       <path d={path} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" />
       <text x={pad.l} y={pad.t - 8} fontFamily="Fraunces, serif" fontSize="13" fontStyle="italic" fill="#1c1a17">{label}</text>
       <text x={pad.l - 6} y={toY(yHi) + 4} fontFamily="JetBrains Mono, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yHi)}</text>
@@ -199,6 +237,10 @@ function App() {
   const [cfl, setCfl]               = useState(0.4);
   const [diaphragm, setDiaphragm]   = useState(PRESETS["Sod"].diaphragm);
   const [bcType, setBcType]         = useState("transmissive");
+  const [flux, setFlux]             = useState("HLLC");
+  const [overlay, setOverlay]       = useState(true);
+  const [tubeMode, setTubeMode]     = useState("density");
+  const [showDerived, setShowDerived] = useState(true);
 
   const [result, setResult] = useState(null);
   const [info, setInfo]     = useState({ t: 0, step: 0, ms: 0 });
@@ -210,8 +252,37 @@ function App() {
   const rafRef       = useRef(null);
 
   const params = useMemo(() => ({
-    N, L: Ldom, tEnd, gamma, cfl, diaphragm, leftState, rightState, bcType
-  }), [N, Ldom, tEnd, gamma, cfl, diaphragm, leftState, rightState, bcType]);
+    N, L: Ldom, tEnd, gamma, cfl, diaphragm, leftState, rightState, bcType, flux
+  }), [N, Ldom, tEnd, gamma, cfl, diaphragm, leftState, rightState, bcType, flux]);
+
+  // ---- Exact Riemann solution at the current time, sampled on result.x ----
+  // Only meaningful with transmissive BCs over an "infinite" domain — we still
+  // compute it for reflective BCs, but it won't match once waves have reflected.
+  const exact = useMemo(() => {
+    if (!result || !overlay) return null;
+    // The analytical Riemann solution assumes an infinite domain. Skip it
+    // for reflective BCs where reflected waves invalidate the comparison.
+    if (bcType === "reflective") return null;
+    try {
+      return exactRiemann(leftState, rightState, gamma, diaphragm, info.t, result.x);
+    } catch (e) { return null; }
+  }, [result, overlay, leftState, rightState, gamma, diaphragm, info.t, bcType]);
+
+  // Derived fields for the exact overlay (Mach, T, s, a).
+  const exactDerived = useMemo(() => {
+    if (!exact) return null;
+    const n = exact.rho.length;
+    const M = new Array(n), T = new Array(n), s = new Array(n), a = new Array(n), e = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const r = exact.rho[i], u = exact.u[i], p = exact.p[i];
+      const aa = Math.sqrt(gamma * Math.max(p, 1e-12) / Math.max(r, 1e-12));
+      a[i] = aa; M[i] = u / aa;
+      T[i] = p / Math.max(r, 1e-12);
+      s[i] = Math.log(Math.max(p, 1e-12) / Math.pow(Math.max(r, 1e-12), gamma));
+      e[i] = p / ((gamma - 1) * Math.max(r, 1e-12));
+    }
+    return { M, T, s, a, e };
+  }, [exact, gamma]);
 
   const validate = () => {
     if (leftState.rho <= 0 || rightState.rho <= 0) return "Density must be positive.";
@@ -316,7 +387,10 @@ function App() {
     setLeftState(p.L); setRightState(p.R); setTEnd(p.tEnd); setDiaphragm(p.diaphragm);
   };
 
-  const C = { rho: "#8b3a2f", u: "#2d5d6e", p: "#4a5d23", e: "#6a3d5e" };
+  const C = {
+    rho: "#8b3a2f", u: "#2d5d6e", p: "#4a5d23", e: "#6a3d5e",
+    M:   "#a4632a", T: "#5d4037", s: "#3c5a3c", a: "#7a4a82"
+  };
   const hasStreaks = animating || (result && result.particles && result.particles.length);
 
   return (
@@ -329,7 +403,7 @@ function App() {
           <h1 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
             1D Euler <span style={{ fontStyle: "normal", fontWeight: 400 }}>{"\u00b7 shock tube laboratory"}</span>
           </h1>
-          <span className="smallcaps" style={{ fontSize: 10, color: "#5a5547" }}>{"HLLC \u00b7 MUSCL \u00b7 SSP-RK2"}</span>
+          <span className="smallcaps" style={{ fontSize: 10, color: "#5a5547" }}>{flux + " \u00b7 MUSCL \u00b7 SSP-RK2"}</span>
         </div>
         <p style={{ margin: "6px 0 0", fontSize: 11, color: "#5a5547", maxWidth: 720 }}>
           Specify left/right gas states across the diaphragm, then run or animate. The tube view shows
@@ -386,11 +460,37 @@ function App() {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 14, padding: "10px 12px",
                      background: "#1c1a17", color: "#efe9d8" }}>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          <span>flux</span>
+          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+            <option value="HLLC">HLLC</option>
+            <option value="HLL">HLL</option>
+            <option value="Roe">Roe</option>
+            <option value="Rusanov">Rusanov</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
           <span>BCs</span>
           <select value={bcType} onChange={e => setBcType(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
             <option value="transmissive">transmissive</option>
             <option value="reflective">reflective</option>
           </select>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          <span>tube</span>
+          <select value={tubeMode} onChange={e => setTubeMode(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+            <option value="density">density</option>
+            <option value="schlieren">schlieren</option>
+            <option value="pressure">pressure</option>
+            <option value="Mach">Mach</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
+          <input type="checkbox" checked={overlay} onChange={e => setOverlay(e.target.checked)} style={{ accentColor: "#8b3a2f" }} />
+          <span>exact overlay</span>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
+          <input type="checkbox" checked={showDerived} onChange={e => setShowDerived(e.target.checked)} style={{ accentColor: "#8b3a2f" }} />
+          <span>derived fields</span>
         </label>
         <button className="btn btn-primary" onClick={runFinal} disabled={busy || animating}>
           {busy ? "computing..." : "run to t_end"}
@@ -417,27 +517,57 @@ function App() {
 
       <div style={{ marginBottom: 14 }}>
         <div className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, color: "#1c1a17", marginBottom: 4 }}>
-          inside the tube {"\u00b7 density field"}{hasStreaks ? " + velocity streaks" : ""}
+          inside the tube {"\u00b7 " + (
+            tubeMode === "schlieren" ? "schlieren (|drho/dx|)" :
+            tubeMode === "pressure" ? "pressure field" :
+            tubeMode === "Mach" ? "Mach field" : "density field"
+          )}{hasStreaks ? " + velocity streaks" : ""}
         </div>
         <div style={{ border: "1px solid #1c1a17" }}>
-          {result && <TubeView result={result} params={params} info={info} />}
+          {result && <TubeView result={result} params={params} info={info} mode={tubeMode} />}
         </div>
       </div>
 
       {result && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, background: "#1c1a17", padding: 14 }}>
-          <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
-            <Plot x={result.x} y={result.rho} label="density rho(x)"   color={C.rho} />
+        <div style={{ background: "#1c1a17", padding: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 14 }}>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.rho} label="density rho(x)" color={C.rho}
+                    exact={exact ? exact.rho : null} />
+            </div>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.u}   label="velocity u(x)"  color={C.u}
+                    exact={exact ? exact.u : null} />
+            </div>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.p}   label="pressure p(x)"  color={C.p}
+                    exact={exact ? exact.p : null} />
+            </div>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.e}   label="internal energy e(x)" color={C.e}
+                    exact={exactDerived ? exactDerived.e : null} />
+            </div>
           </div>
-          <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
-            <Plot x={result.x} y={result.u}   label="velocity u(x)"    color={C.u} />
-          </div>
-          <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
-            <Plot x={result.x} y={result.p}   label="pressure p(x)"    color={C.p} />
-          </div>
-          <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
-            <Plot x={result.x} y={result.e}   label="internal energy e(x)" color={C.e} />
-          </div>
+          {showDerived && (
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 14, marginTop: 14 }}>
+              <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+                <Plot x={result.x} y={result.M} label="Mach M(x)" color={C.M}
+                      exact={exactDerived ? exactDerived.M : null} />
+              </div>
+              <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+                <Plot x={result.x} y={result.T} label="temperature T(x)" color={C.T}
+                      exact={exactDerived ? exactDerived.T : null} />
+              </div>
+              <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+                <Plot x={result.x} y={result.s} label="entropy s(x)" color={C.s}
+                      exact={exactDerived ? exactDerived.s : null} />
+              </div>
+              <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+                <Plot x={result.x} y={result.a} label="sound speed a(x)" color={C.a}
+                      exact={exactDerived ? exactDerived.a : null} />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
