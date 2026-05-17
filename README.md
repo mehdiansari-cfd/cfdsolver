@@ -1,15 +1,16 @@
-# 1D Euler Laboratory
+# Euler Laboratory
 
-A self-contained, browser-based playground for the 1D compressible Euler equations, covering two canonical problems on the same finite-volume engine:
+A self-contained, browser-based playground for the compressible Euler equations, covering three canonical problems on a shared finite-volume engine:
 
-- **Shock tube** — the classic Riemann problem with shocks, contacts, and rarefactions.
+- **1D shock tube** — the classic Riemann problem with shocks, contacts, and rarefactions.
 - **Quasi-1D nozzle** — convergent, divergent, or convergent-divergent (CD) duct driven by a stagnation reservoir at the inlet and a static back-pressure at the exit; reproduces subsonic, choked, normal-shock-in-divergent, and fully supersonic flow regimes.
+- **2D Cartesian** — full 2D Euler on a Cartesian grid, with presets for the radial Sod problem, the Lax–Liu four-quadrant Riemann (config 3), the Sedov point-blast wave, and the Kelvin–Helmholtz shear instability.
 
-Both modules share four selectable Riemann fluxes, MUSCL reconstruction, SSP-RK2 time integration, and a matching analytical reference overlay (exact Riemann for the tube, isentropic A/A* theory for the nozzle).
+All three modules share four selectable Riemann fluxes, MUSCL reconstruction, SSP-RK2 time integration, and a matching analytical reference where one exists (exact Riemann for the tube, isentropic A/A* theory for the nozzle).
 
-No build step, no dependencies to install — open `index.html` in a modern browser and the lab is running.
+No build step, no dependencies to install — open `index.html` (1D shock tube + nozzle) or `index2d.html` (2D) in a modern browser and the lab is running.
 
-The math lives in `solver.js` and `nozzle.js` as pure modules with no DOM coupling, so you can also `require` them from Node for headless experiments, convergence studies, or test scripts.
+The math lives in `solver.js`, `nozzle.js`, and `solver2d.js` as pure modules with no DOM coupling, so you can also `require` them from Node for headless experiments, convergence studies, or test scripts.
 
 ---
 
@@ -32,6 +33,16 @@ dU/dt + dF(U)/dx = H,    H = -(1/A) (dA/dx) · [ρu, ρu², u(E+p)]
 ```
 
 driven by a stagnation reservoir `(p₀, T₀)` at the inlet (closed with the outgoing Riemann invariant) and a static back pressure `p_b` at the exit (switching automatically between subsonic and supersonic behaviour as the local exit Mach crosses unity). Time-marched to steady state.
+
+**2D Cartesian** (full two-dimensional Euler):
+
+```
+dU/dt + dF(U)/dx + dG(U)/dy = 0,    U = [ρ, ρu, ρv, E]
+F = [ρu, ρu² + p, ρuv,     u(E+p)]
+G = [ρv, ρuv,     ρv² + p, v(E+p)]
+```
+
+solved on a uniform Cartesian grid with transmissive (zero-gradient) boundaries on all four walls. The 1D Riemann solvers are extended to 2D by carrying the tangential momentum as a passive scalar across the wave pattern (the rotational invariance of the Euler equations makes this exact for axis-aligned faces).
 
 ---
 
@@ -76,12 +87,12 @@ That's it. The page loads React, ReactDOM, and Babel-standalone from a CDN, then
 
 | Stage              | Scheme                                              |
 |--------------------|-----------------------------------------------------|
-| Spatial discretisation | Finite-volume, cell-centred, 2 ghost cells per side |
-| Reconstruction     | MUSCL with minmod slope limiter (piecewise linear)  |
-| Riemann solver     | HLLC / HLL / Roe / Rusanov (selectable)             |
+| Spatial discretisation | Finite-volume, cell-centred, 2 ghost cells per side; 1D in `solver.js` / `nozzle.js`, 2D Cartesian in `solver2d.js` |
+| Reconstruction     | MUSCL with minmod slope limiter (piecewise linear); independent x- and y-slopes in 2D |
+| Riemann solver     | HLLC / HLL / Roe / Rusanov (selectable); 2D version carries tangential momentum as a passive scalar |
 | Time integration   | SSP-RK2 (two-stage, strong-stability-preserving)    |
-| Time step          | Δt = CFL · Δx / max(|u| + a), recomputed each step  |
-| Boundary conditions| Shock tube: transmissive or reflective. Nozzle: reservoir `(p₀, T₀)` inlet + static back-pressure exit (with auto sub/supersonic switch). |
+| Time step          | 1D: Δt = CFL · Δx / max(|u| + a). 2D: Δt = CFL · min(Δx, Δy) / max(|u| + |v| + a). Recomputed each step. |
+| Boundary conditions| Shock tube: transmissive or reflective. Nozzle: reservoir `(p₀, T₀)` inlet + static back-pressure exit (with auto sub/supersonic switch). 2D: transmissive on all four walls. |
 
 ---
 
@@ -131,18 +142,39 @@ Stagnation conditions are `p₀ = 1`, `T₀ = 1` (non-dimensional, R = 1), γ = 
 
 ---
 
+## 2D module
+
+Full two-dimensional compressible Euler on a Cartesian grid. The 1D Riemann solvers from `solver.js` are extended to 2D by treating the tangential momentum as a passive scalar (the Euler system is rotationally invariant, so this is exact for axis-aligned faces). MUSCL-minmod reconstruction is done independently in `x` and `y`; time integration is SSP-RK2 with `Δt = CFL · min(Δx, Δy) / max(|u| + |v| + a)`. Boundaries are transmissive (zero-gradient) on all four walls.
+
+Storage is laid out as flat `Float64Array`s of length `(Nx+4) × (Ny+4)` (two ghost cells per side), and all the slope / flux / RHS buffers are allocated once in `initState2D` and reused — this keeps the JS engine off the heap during the time loop and makes Nx = Ny = 200 comfortably interactive in the browser.
+
+The 2D UI (`index2d.html`) is the parallel page to the shock-tube lab: a canvas heatmap (density, schlieren, pressure, or Mach) with two SVG line-out plots cut through the x- and y-midlines so you can read wave structure quantitatively.
+
+### 2D test problems
+
+| Preset                      | Domain    | Grid   | t_end | Notes |
+|-----------------------------|-----------|--------|-------|-------|
+| Sod-radial                  | 1 × 1     | 200²   | 0.25  | Circular diaphragm at r = 0.4. Tests preservation of radial symmetry — any anisotropy is mesh-induced. |
+| 2D Riemann (config 3)       | 1 × 1     | 200²   | 0.30  | Schulz-Rinne / Lax–Liu configuration 3: four constant states in four quadrants. Classic shock-vortex test. |
+| Sedov blast                 | 2 × 2     | 200²   | 1.0   | Point energy deposition at the center with ambient `p = 10⁻⁴`. Stresses positivity preservation at extreme ratios. |
+| Kelvin–Helmholtz            | 1 × 1     | 256²   | 2.0   | Two-layer shear with a localised v-perturbation. Sensitive to numerical dissipation; good scheme comparator. |
+
+---
+
 ## File layout
 
 ```
 cfdsolver/
-├── index.html      UI (React via Babel-standalone), canvas + SVG rendering
-├── solver.js       Shock-tube math: fluxes, MUSCL, SSP-RK2, exact Riemann
+├── index.html      1D UI: shock tube + nozzle (React via Babel-standalone, canvas + SVG)
+├── index2d.html    2D UI: heatmap + centerline line-outs (React via Babel-standalone)
+├── solver.js       1D shock-tube math: fluxes, MUSCL, SSP-RK2, exact Riemann
 ├── nozzle.js       Quasi-1D nozzle math: area source, reservoir + back-pressure BCs,
 │                   isentropic A/A* overlay. Builds on solver.js's flux machinery.
+├── solver2d.js     2D Cartesian Euler: 2D-aware HLLC/HLL/Roe/Rusanov, MUSCL, SSP-RK2
 └── README.md       This file
 ```
 
-`solver.js` and `nozzle.js` know nothing about the DOM. `index.html` knows nothing about HLLC. They communicate through plain JS globals. `nozzle.js` depends on `solver.js` (it reuses `primToCons`, `FLUXES`, `computeRhs`, and `extract`), so `solver.js` must be loaded first.
+`solver.js`, `nozzle.js`, and `solver2d.js` know nothing about the DOM. The HTML files know nothing about HLLC. They communicate through plain JS globals. `nozzle.js` depends on `solver.js` (it reuses `primToCons`, `FLUXES`, `computeRhs`, and `extract`), so when used together `solver.js` must be loaded first. `solver2d.js` is self-contained — it does not import `solver.js`.
 
 ---
 
@@ -217,6 +249,38 @@ Public surface:
 - `isentropicSolution(state, "subsonic" | "supersonic")` — analytical isentropic profile for overlay.
 - `NOZZLE_PRESETS` — the six regimes tabulated above.
 
+### 2D
+
+```js
+const S2 = require("./solver2d");
+
+const preset = S2.PRESETS2D["Sod-radial"];
+const params = {
+  Nx: 200, Ny: 200,
+  Lx: preset.Lx, Ly: preset.Ly,
+  gamma: preset.gamma, cfl: preset.cfl, flux: "HLLC",
+  initFn: preset.init                  // (x, y) => { rho, u, v, p }
+};
+
+let state = S2.initState2D(params);
+state = S2.stepUntil2D(state, 0.25);
+
+const sol = S2.extract2D(state);       // { Nx, Ny, xs, ys, rho, u, v, p, e, M }  flat Nx*Ny arrays
+const midRow = S2.slice2D(sol.rho, sol.Nx, sol.Ny, "x", Math.floor(sol.Ny / 2));
+```
+
+Public surface:
+
+- `hllc2d`, `hll2d`, `roe2d`, `rusanov2d` — 4-component Riemann solvers with signature `(UL, UR, γ, axis)` where `axis = 0` is x-faces and `axis = 1` is y-faces. The tangential momentum is advected with the contact wave.
+- `FLUXES2D` — `{ HLLC, HLL, Roe, Rusanov }` name-to-function table.
+- `applyBcs2D(state)` — transmissive (zero-gradient) on all four walls.
+- `computeRhs2D(state, fluxFn, rho, mu, mv, E)` — spatial operator. Reads from the supplied arrays, writes the RHS into `state.work.r1..r4` and intermediate buffers.
+- `initState2D(params)` — allocates state plus persistent work arrays. The `initFn(x, y)` callback returns the primitive state at the cell centre.
+- `stepUntil2D(state, tTarget)` — SSP-RK2 + adaptive CFL.
+- `extract2D(state)` — primitive + derived fields on interior cells, as flat `Float64Array`s of length `Nx*Ny`.
+- `slice2D(field, Nx, Ny, "x" | "y", idx)` — extract a row or column for line-out plots.
+- `PRESETS2D` — the four 2D problems tabulated above.
+
 ---
 
 ## UI quick reference
@@ -255,8 +319,9 @@ The lab is deliberately small and pedagogical. A non-exhaustive list of things i
 - Higher-order reconstruction (PPM, WENO5, MP5).
 - Other source terms (gravity, friction, cylindrical / spherical 1D — the quasi-1D area source is already in `nozzle.js`).
 - Real-gas equations of state, multi-species, or reactive flow.
-- Multiple spatial dimensions.
-- Convergence studies / order-of-accuracy plots against the exact Riemann or isentropic reference.
+- 3D, unstructured / curvilinear grids, AMR.
+- Reflective / periodic / inflow BCs for the 2D module (currently transmissive only).
+- Convergence studies / order-of-accuracy plots against the exact Riemann, isentropic reference, or Sedov self-similar solution.
 - Probes with time-history recording and a scrub bar.
 - Custom-preset save/load and CSV/JSON export of the solution.
 - Unsteady nozzle scenarios (back-pressure ramps, starting-shock transients).
