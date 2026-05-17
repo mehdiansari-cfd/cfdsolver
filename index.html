@@ -36,6 +36,7 @@
 
 <!-- CFD solver (math layer, no DOM). Must load BEFORE the UI script. -->
 <script src="solver.js"></script>
+<script src="nozzle.js"></script>
 </head>
 <body>
 <div id="root">
@@ -226,8 +227,8 @@ function NumField({ label, value, onChange, step }) {
   );
 }
 
-// ---------- Main app ----------
-function App() {
+// ---------- Shock tube app (original) ----------
+function ShockTubeApp() {
   const [leftState, setLeftState]   = useState(PRESETS["Sod"].L);
   const [rightState, setRightState] = useState(PRESETS["Sod"].R);
   const [N, setN]                   = useState(300);
@@ -576,6 +577,427 @@ function App() {
         <span>dU/dt + dF(U)/dx = 0  {"\u00b7"}  U = [rho, rho*u, E]  {"\u00b7"}  E = p/(gamma-1) + (1/2)*rho*u^2</span>
         <span className="smallcaps">finite volume {"\u00b7"} 1D {"\u00b7"} ideal gas</span>
       </footer>
+    </div>
+  );
+}
+
+// ---------- Nozzle cross-section canvas ----------
+function NozzleView({ result, nozzleState, mode }) {
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv || !result || !nozzleState) return;
+    const ctx = cv.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = cv.clientWidth, cssH = cv.clientHeight;
+    if (cv.width !== cssW * dpr || cv.height !== cssH * dpr) {
+      cv.width = cssW * dpr; cv.height = cssH * dpr;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const W = cssW, H = cssH;
+    const padX = 14, padY = 18;
+    const plotW = W - 2 * padX, plotH = H - 2 * padY;
+    const { N, L, AR, type } = nozzleState;
+
+    ctx.fillStyle = "#efe9d8"; ctx.fillRect(0, 0, W, H);
+
+    // Pick scalar field
+    let field, label;
+    if (mode === "pressure")    { field = result.p;   label = "p"; }
+    else if (mode === "temp")   { field = result.T;   label = "T"; }
+    else if (mode === "Mach")   { field = result.M;   label = "M"; }
+    else                        { field = result.rho; label = "rho"; }
+
+    let minV = Infinity, maxV = -Infinity;
+    const Nn = result.x.length;
+    for (let i = 0; i < Nn; i++) {
+      if (field[i] < minV) minV = field[i];
+      if (field[i] > maxV) maxV = field[i];
+    }
+    const range = Math.max(maxV - minV, 1e-12);
+
+    // Draw filled nozzle interior column by column
+    for (let i = 0; i < Nn; i++) {
+      const xc = result.x[i];
+      const Ai = nozzleArea(xc, L, AR, type);
+      const halfH = (Ai / AR) * (plotH / 2);
+      const cx = padX + (i / Nn) * plotW;
+      const cw = plotW / Nn + 0.6;
+      const cy_mid = padY + plotH / 2;
+      const norm = (field[i] - minV) / range;
+      const v = Math.round(247 - norm * 215);
+      ctx.fillStyle = "rgb(" + v + "," + Math.max(0, v - 6) + "," + Math.max(0, v - 18) + ")";
+      ctx.fillRect(cx, cy_mid - halfH, cw, 2 * halfH);
+    }
+
+    // Shading overlay (top/bottom fade)
+    const grad = ctx.createLinearGradient(0, padY, 0, padY + plotH);
+    grad.addColorStop(0,   "rgba(0,0,0,0.15)");
+    grad.addColorStop(0.5, "rgba(0,0,0,0.0)");
+    grad.addColorStop(1,   "rgba(0,0,0,0.15)");
+    ctx.fillStyle = grad;
+    // Clip fill to nozzle interior
+    ctx.save();
+    ctx.beginPath();
+    for (let i = 0; i <= Nn; i++) {
+      const xc = i < Nn ? result.x[i] : L;
+      const Ai = nozzleArea(Math.min(xc, L), L, AR, type);
+      const halfH = (Ai / AR) * (plotH / 2);
+      const cx = padX + (i / Nn) * plotW;
+      if (i === 0) ctx.moveTo(cx, padY + plotH / 2 - halfH);
+      else         ctx.lineTo(cx, padY + plotH / 2 - halfH);
+    }
+    for (let i = Nn; i >= 0; i--) {
+      const xc = i < Nn ? result.x[i] : L;
+      const Ai = nozzleArea(Math.min(xc, L), L, AR, type);
+      const halfH = (Ai / AR) * (plotH / 2);
+      const cx = padX + (i / Nn) * plotW;
+      ctx.lineTo(cx, padY + plotH / 2 + halfH);
+    }
+    ctx.closePath(); ctx.clip();
+    ctx.fillRect(0, 0, W, H);
+    ctx.restore();
+
+    // Nozzle walls
+    ctx.lineWidth = 2; ctx.strokeStyle = "#1c1a17";
+    for (const sign of [-1, 1]) {
+      ctx.beginPath();
+      for (let i = 0; i <= Nn; i++) {
+        const xc = i < Nn ? result.x[i] : L;
+        const Ai = nozzleArea(Math.min(xc, L), L, AR, type);
+        const halfH = (Ai / AR) * (plotH / 2);
+        const cx = padX + (i / Nn) * plotW;
+        const cy = padY + plotH / 2 + sign * halfH;
+        i === 0 ? ctx.moveTo(cx, cy) : ctx.lineTo(cx, cy);
+      }
+      ctx.stroke();
+    }
+    // End caps
+    ctx.lineWidth = 1.5;
+    for (const xi of [0, L]) {
+      const Ai = nozzleArea(xi === 0 ? 0 : L, L, AR, type);
+      const halfH = (Ai / AR) * (plotH / 2);
+      const cx = xi === 0 ? padX : padX + plotW;
+      ctx.beginPath();
+      ctx.moveTo(cx, padY + plotH / 2 - halfH);
+      ctx.lineTo(cx, padY + plotH / 2 + halfH);
+      ctx.stroke();
+    }
+
+    // Labels
+    ctx.font = "9px JetBrains Mono, monospace"; ctx.fillStyle = "#5a5547";
+    ctx.textAlign = "left";
+    ctx.fillText(label + " ∈ [" + minV.toFixed(3) + ", " + maxV.toFixed(3) + "]", padX, padY - 5);
+    ctx.textAlign = "center";
+    ctx.fillText("throat", padX + (type === "convergent" ? plotW : type === "divergent" ? 0 : plotW / 2), padY + plotH + 12);
+    ctx.textAlign = "left";  ctx.fillText("inlet", padX, padY + plotH + 12);
+    ctx.textAlign = "right"; ctx.fillText("exit", padX + plotW, padY + plotH + 12);
+  }, [result, nozzleState, mode]);
+
+  return <canvas ref={canvasRef} style={{ width: "100%", height: 160, display: "block", background: "#efe9d8" }} />;
+}
+
+// ---------- Nozzle app ----------
+function NozzleApp() {
+  const [preset, setPreset]       = useState("Choked CD");
+  const [nozzType, setNozzType]   = useState("CD");
+  const [AR, setAR]               = useState(2.0);
+  const [p0, setP0]               = useState(1.0);
+  const [T0, setT0]               = useState(1.0);
+  const [pb, setPb]               = useState(0.93);
+  const [N, setN]                 = useState(300);
+  const [Ldom, setLdom]           = useState(1.0);
+  const [gamma, setGamma]         = useState(1.4);
+  const [cfl, setCfl]             = useState(0.4);
+  const [tEnd, setTEnd]           = useState(8.0);
+  const [flux, setFlux]           = useState("HLLC");
+  const [tubeMode, setTubeMode]   = useState("Mach");
+  const [branch, setBranch]       = useState("subsonic");
+  const [showIso, setShowIso]     = useState(true);
+
+  const [result, setResult]           = useState(null);
+  const [isoResult, setIsoResult]     = useState(null);
+  const [nozzleState, setNozzleState] = useState(null);
+  const [info, setInfo]               = useState({ t: 0, step: 0, ms: 0 });
+  const [busy, setBusy]               = useState(false);
+  const [err, setErr]                 = useState(null);
+  const [animating, setAnimating]     = useState(false);
+  const stateRef = useRef(null);
+  const rafRef   = useRef(null);
+
+  const stopAnim = () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null; setAnimating(false);
+  };
+
+  const getParams = () => ({
+    type: nozzType, AR, p0, T0, pb, N, L: Ldom, gamma, cfl, tEnd, flux
+  });
+
+  const loadPreset = name => {
+    stopAnim();
+    const q = NOZZLE_PRESETS[name];
+    setPreset(name); setNozzType(q.type); setAR(q.AR); setP0(q.p0);
+    setT0(q.T0); setPb(q.pb); setN(q.N); setLdom(q.L);
+    setGamma(q.gamma); setCfl(q.cfl); setTEnd(q.tEnd); setBranch(q.branch);
+  };
+
+  const runFinal = (overrideParams) => {
+    stopAnim();
+    setErr(null); setBusy(true);
+    const p = overrideParams || getParams();
+    const br = branch;
+    setTimeout(() => {
+      try {
+        const t0 = performance.now();
+        let s = initNozzleState(p);
+        s = nozzleStepUntil(s, p.tEnd);
+        const ms = performance.now() - t0;
+        const ext = extractNozzle(s);
+        const iso = showIso ? isentropicSolution(s, br) : null;
+        setResult(ext); setNozzleState(s); setIsoResult(iso);
+        setInfo({ t: s.t, step: s.step, ms });
+        setBusy(false);
+      } catch (e) { setErr("Solver error: " + e.message); setBusy(false); }
+    }, 10);
+  };
+
+  const animate = () => {
+    stopAnim(); setErr(null);
+    const p = getParams(); const br = branch;
+    const t0 = performance.now();
+    let s = initNozzleState(p);
+    stateRef.current = s;
+    const ext0 = extractNozzle(s);
+    const iso = showIso ? isentropicSolution(s, br) : null;
+    setResult(ext0); setNozzleState(s); setIsoResult(iso);
+    setInfo({ t: 0, step: 0, ms: 0 }); setAnimating(true);
+
+    const FRAMES = 90; let frame = 0;
+    const tick = () => {
+      frame++;
+      const target = Math.min(p.tEnd, (frame / FRAMES) * p.tEnd);
+      stateRef.current = nozzleStepUntil(stateRef.current, target);
+      const ext = extractNozzle(stateRef.current);
+      setResult(ext); setNozzleState(stateRef.current);
+      setInfo({ t: stateRef.current.t, step: stateRef.current.step, ms: performance.now() - t0 });
+      if (stateRef.current.t < p.tEnd) {
+        rafRef.current = requestAnimationFrame(tick);
+      } else { rafRef.current = null; setAnimating(false); }
+    };
+    rafRef.current = requestAnimationFrame(tick);
+  };
+
+  // Load default preset on mount
+  useEffect(() => { loadPreset("Choked CD"); }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { runFinal({ type: "CD", AR: 2.0, p0: 1, T0: 1, pb: 0.93, N: 300, L: 1, gamma: 1.4, cfl: 0.4, tEnd: 8 }); }, []);
+
+  const C = { M: "#a4632a", p: "#4a5d23", T: "#5d4037", rho: "#8b3a2f", pt: "#2d5d6e" };
+
+  return (
+    <div className="grain" style={{ minHeight: "100vh", background: "#efe9d8", color: "#1c1a17",
+      fontFamily: "JetBrains Mono, monospace", padding: "24px 22px 36px" }}>
+      <header style={{ borderBottom: "1.5px solid #1c1a17", paddingBottom: 10, marginBottom: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
+          <h1 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
+            Quasi-1D Nozzle <span style={{ fontStyle: "normal", fontWeight: 400 }}>{"· Euler flow"}</span>
+          </h1>
+          <span className="smallcaps" style={{ fontSize: 10, color: "#5a5547" }}>{flux + " · MUSCL · SSP-RK2"}</span>
+        </div>
+        <p style={{ margin: "6px 0 0", fontSize: 11, color: "#5a5547", maxWidth: 720 }}>
+          Variable-area duct with isentropic reservoir inlet and back-pressure exit.
+          Switch nozzle type to compare convergent, divergent, and CD (converging-diverging) flows.
+          The dashed overlay shows the analytical isentropic solution for reference.
+        </p>
+      </header>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, alignItems: "center" }}>
+        <span className="smallcaps" style={{ fontSize: 10, color: "#5a5547", marginRight: 4 }}>{"presets ›"}</span>
+        {Object.keys(NOZZLE_PRESETS).map(name => (
+          <button key={name} className="btn"
+            style={{ background: preset === name ? "#8b3a2f" : "#f7f2e3",
+                     color: preset === name ? "#efe9d8" : "#1c1a17",
+                     borderColor: preset === name ? "#8b3a2f" : "#1c1a17" }}
+            onClick={() => { loadPreset(name); }}>
+            {name}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
+        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+            nozzle geometry
+          </legend>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11, color: "#1c1a17" }}>
+              <span style={{ letterSpacing: "0.08em", textTransform: "uppercase", color: "#5a5547", fontSize: 9 }}>type</span>
+              <select value={nozzType} onChange={e => setNozzType(e.target.value)}>
+                <option value="convergent">Convergent</option>
+                <option value="divergent">Divergent</option>
+                <option value="CD">Converging-Diverging (CD)</option>
+              </select>
+            </label>
+            <NumField label={"AR  (Aₘₐₓ / A⨀)"} value={AR} onChange={setAR} step={0.1} />
+          </div>
+        </fieldset>
+
+        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+            boundary conditions
+          </legend>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            <NumField label="p₀ inlet"  value={p0} onChange={setP0} step={0.05} />
+            <NumField label="T₀ inlet"  value={T0} onChange={setT0} step={0.05} />
+            <NumField label="pᵇ exit"   value={pb} onChange={setPb} step={0.01} />
+          </div>
+          <div style={{ marginTop: 8, fontSize: 10, color: "#5a5547" }}>
+            {"pᵇ / p₀ = " + (pb / Math.max(p0, 1e-9)).toFixed(4)}
+            {" · p*/p₀ = " + Math.pow(2 / (gamma + 1), gamma / (gamma - 1)).toFixed(4)}
+          </div>
+        </fieldset>
+
+        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+            numerics & domain
+          </legend>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+            <NumField label="gamma"   value={gamma} onChange={setGamma} step={0.05} />
+            <NumField label="CFL"     value={cfl}   onChange={setCfl}   step={0.05} />
+            <NumField label="N cells" value={N}     onChange={v => setN(Math.round(v))} step={50} />
+            <NumField label="t end"   value={tEnd}  onChange={setTEnd}  step={0.5} />
+            <NumField label="L"       value={Ldom}  onChange={setLdom}  step={0.1} />
+          </div>
+        </fieldset>
+      </div>
+
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 14, padding: "10px 12px",
+                     background: "#1c1a17", color: "#efe9d8" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          <span>flux</span>
+          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+            <option value="HLLC">HLLC</option>
+            <option value="HLL">HLL</option>
+            <option value="Roe">Roe</option>
+            <option value="Rusanov">Rusanov</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          <span>view</span>
+          <select value={tubeMode} onChange={e => setTubeMode(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+            <option value="Mach">Mach</option>
+            <option value="pressure">pressure</option>
+            <option value="temp">temperature</option>
+            <option value="density">density</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+          <span>overlay</span>
+          <select value={branch} onChange={e => setBranch(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+            <option value="subsonic">isentropic subsonic</option>
+            <option value="supersonic">isentropic supersonic</option>
+          </select>
+        </label>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
+          <input type="checkbox" checked={showIso} onChange={e => setShowIso(e.target.checked)} style={{ accentColor: "#8b3a2f" }} />
+          <span>isentropic overlay</span>
+        </label>
+        <button className="btn btn-primary" onClick={() => runFinal()} disabled={busy || animating}>
+          {busy ? "computing..." : "run to t_end"}
+        </button>
+        <button className="btn" onClick={animate} disabled={busy || animating}
+                style={{ background: animating ? "#8b3a2f" : "#efe9d8", color: animating ? "#efe9d8" : "#1c1a17" }}>
+          {animating ? "animating..." : "animate flow"}
+        </button>
+        {animating && <button className="btn" onClick={stopAnim} style={{ background: "#efe9d8", color: "#1c1a17" }}>stop</button>}
+        <div style={{ marginLeft: "auto", fontSize: 11, display: "flex", gap: 18, color: "#efe9d8" }}>
+          <span><span style={{ color: "#a8a297" }}>t = </span>{info.t.toFixed(4)}</span>
+          <span><span style={{ color: "#a8a297" }}>steps = </span>{info.step}</span>
+          <span><span style={{ color: "#a8a297" }}>wall = </span>{info.ms.toFixed(0)} ms</span>
+        </div>
+      </div>
+
+      {err && (
+        <div style={{ padding: "8px 12px", border: "1px solid #8b3a2f", background: "#f7e4df",
+                       color: "#8b3a2f", fontSize: 11, marginBottom: 12 }}>! {err}</div>
+      )}
+
+      <div style={{ marginBottom: 14 }}>
+        <div className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, color: "#1c1a17", marginBottom: 4 }}>
+          {(nozzType === "CD" ? "converging-diverging" : nozzType) + " nozzle · " + (
+            tubeMode === "pressure" ? "pressure field" :
+            tubeMode === "temp"     ? "temperature field" :
+            tubeMode === "Mach"     ? "Mach field" : "density field"
+          )}
+        </div>
+        <div style={{ border: "1px solid #1c1a17" }}>
+          {result && nozzleState && <NozzleView result={result} nozzleState={nozzleState} mode={tubeMode} />}
+        </div>
+      </div>
+
+      {result && (
+        <div style={{ background: "#1c1a17", padding: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 14 }}>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.M}   label="Mach M(x)"          color={C.M}
+                    exact={isoResult && showIso ? isoResult.M   : null} />
+            </div>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.p}   label="pressure p(x)"      color={C.p}
+                    exact={isoResult && showIso ? isoResult.p   : null} />
+            </div>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.T}   label="temperature T(x)"   color={C.T}
+                    exact={isoResult && showIso ? isoResult.T   : null} />
+            </div>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.rho} label="density ρ(x)"  color={C.rho}
+                    exact={isoResult && showIso ? isoResult.rho : null} />
+            </div>
+            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <Plot x={result.x} y={result.pt}  label="total pressure pₜ(x)" color={C.pt}
+                    exact={isoResult && showIso ? isoResult.pt  : null} />
+            </div>
+          </div>
+        </div>
+      )}
+
+      <footer style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid #c8c0aa", fontSize: 10, color: "#5a5547",
+                        display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+        <span>dU/dt + dF/dx = H  {"·"}  H = -(dA/dx)/A [0, ρu², u(E+p)]  {"·"}  A_throat = 1</span>
+        <span className="smallcaps">quasi-1D {"·"} isentropic reservoir BC {"·"} ideal gas</span>
+      </footer>
+    </div>
+  );
+}
+
+// ---------- Top-level app with solver switcher ----------
+function App() {
+  const [mode, setMode] = useState("shocktube");
+  const tabStyle = active => ({
+    fontFamily: "JetBrains Mono, monospace",
+    fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase",
+    padding: "10px 18px", border: "none", cursor: "pointer",
+    borderBottom: active ? "2.5px solid #8b3a2f" : "2.5px solid transparent",
+    background: "transparent",
+    color: active ? "#8b3a2f" : "#5a5547",
+    fontWeight: active ? 700 : 400,
+    transition: "color 120ms"
+  });
+  return (
+    <div style={{ background: "#efe9d8", minHeight: "100vh" }}>
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 0,
+                     borderBottom: "1.5px solid #1c1a17", background: "#efe9d8",
+                     padding: "0 22px", position: "sticky", top: 0, zIndex: 10 }}>
+        <button style={tabStyle(mode === "shocktube")} onClick={() => setMode("shocktube")}>
+          Shock Tube
+        </button>
+        <button style={tabStyle(mode === "nozzle")} onClick={() => setMode("nozzle")}>
+          Nozzle Flow
+        </button>
+      </div>
+      {mode === "shocktube" ? <ShockTubeApp /> : <NozzleApp />}
     </div>
   );
 }
