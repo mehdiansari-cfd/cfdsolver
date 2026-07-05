@@ -1,0 +1,26 @@
+# This project is intentionally buildless — there is nothing to compile or bundle.
+# These entries just keep local tooling, editor, and OS cruft out of the repo.
+
+# Node (only Node's built-in test runner is used; no runtime dependencies)
+node_modules/
+npm-debug.log*
+yarn-error.log*
+package-lock.json
+
+# Claude Code / agent local artifacts
+.claude/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local scratch
+*.log
+tmp/
+scratch/
