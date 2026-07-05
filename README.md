@@ -1,6 +1,36 @@
 # Euler Laboratory
 
-A self-contained, browser-based playground for the compressible Euler equations, covering three canonical problems on a shared finite-volume engine:
+A self-contained, browser-based playground for the compressible Euler equations — shock tubes, quasi-1D nozzles, and 2D Cartesian flows on a shared finite-volume engine. No build step, no dependencies, no server.
+
+## Quickstart in 30 seconds
+
+**▶ [Open the live demo](https://mehdiansari-cfd.github.io/cfdsolver/)** — nothing to install; pick a preset and hit *run*.
+
+Or run it locally:
+
+```bash
+git clone https://github.com/mehdiansari-cfd/cfdsolver.git
+cd cfdsolver
+# then just open the HTML files in a browser:
+open index.html        # 1D shock tube + nozzle   (macOS; use `start` on Windows, `xdg-open` on Linux)
+open index2d.html      # 2D Cartesian
+```
+
+That's the whole setup. Each page loads React and Babel-standalone from a CDN, then the solver math, and renders. There is no toolchain, no `npm install`, no bundler.
+
+<!-- HERO — see docs/CAPTURE.md; uncomment once docs/hero.png is recorded.
+![The 1D Euler shock-tube lab running the Sod problem, with the exact Riemann solution overlaid.](docs/hero.png)
+-->
+
+<!-- GIFS — see docs/CAPTURE.md; uncomment once the recordings exist.
+| Sod shock tube | Choked CD nozzle | Kelvin–Helmholtz (2D) |
+|:--:|:--:|:--:|
+| ![Sod shock tube animating](docs/sod-shocktube.gif) | ![CD nozzle reaching steady state](docs/nozzle-cd.gif) | ![Kelvin–Helmholtz roll-up](docs/kelvin-helmholtz.gif) |
+-->
+
+> **Screenshots & GIFs are coming.** [`docs/CAPTURE.md`](docs/CAPTURE.md) lists exactly which presets and frames to record; once the files land in `docs/`, uncomment the blocks above.
+
+## What's inside
 
 - **1D shock tube** — the classic Riemann problem with shocks, contacts, and rarefactions.
 - **Quasi-1D nozzle** — convergent, divergent, or convergent-divergent (CD) duct driven by a stagnation reservoir at the inlet and a static back-pressure at the exit; reproduces subsonic, choked, normal-shock-in-divergent, and fully supersonic flow regimes.
@@ -8,9 +38,13 @@ A self-contained, browser-based playground for the compressible Euler equations,
 
 All three modules share four selectable Riemann fluxes, MUSCL reconstruction, SSP-RK2 time integration, and a matching analytical reference where one exists (exact Riemann for the tube, isentropic A/A* theory for the nozzle).
 
-No build step, no dependencies to install — open `index.html` (1D shock tube + nozzle) or `index2d.html` (2D) in a modern browser and the lab is running.
-
 The math lives in `solver.js`, `nozzle.js`, and `solver2d.js` as pure modules with no DOM coupling, so you can also `require` them from Node for headless experiments, convergence studies, or test scripts.
+
+## Who it's for
+
+**For students.** Land on the [live demo](https://mehdiansari-cfd.github.io/cfdsolver/), click a preset (start with Sod), and hit *run* or *animate*. Toggle the *exact overlay* to see how close the numerical solution gets, then switch the *flux* dropdown between HLLC, HLL, Roe, and Rusanov to watch a contact discontinuity sharpen or smear. The nozzle tab makes choking and shock-in-nozzle behaviour tangible; the 2D tab shows how a radial shock or a shear layer evolves. No setup stands between you and the physics.
+
+**For researchers / instructors.** The solvers are DOM-free CommonJS modules, so you can drive them headlessly from Node for convergence studies, order-of-accuracy checks against the exact Riemann and isentropic references, or as a scratchpad for a new flux or limiter. The [Programmatic API](#programmatic-api) section shows the entry points; [`test.js`](test.js) is a worked example (see [Validation](#validation)). Because everything is a few hundred lines of readable JavaScript with no build step, it's easy to fork, instrument, and drop a new scheme into the `FLUXES` table.
 
 ---
 
@@ -46,15 +80,21 @@ solved on a uniform Cartesian grid with transmissive (zero-gradient) boundaries 
 
 ---
 
-## Try it
+## Validation
 
-```text
-git clone https://github.com/<you>/cfdsolver.git
-cd cfdsolver
-open index.html        # or just double-click it
+The solvers ship with a zero-dependency verification suite. Run it with:
+
+```bash
+node test.js
 ```
 
-That's it. The page loads React, ReactDOM, and Babel-standalone from a CDN, then `solver.js` for the math, then renders the lab into `#root`. There's no toolchain, no `npm install`, no bundler. Everything is a single page.
+It uses only Node's built-in `assert` — no test framework, no dev-dependencies — and [CI runs it on every push and pull request](.github/workflows/test.yml). It checks three things:
+
+- **Accuracy.** The numerical Sod density profile is compared against the exact Riemann solution; the L1 error is ~1.5×10⁻³ at N = 800 (below a 5×10⁻³ bound) and decreases under grid refinement — the strongest evidence the scheme is correct.
+- **Positivity.** Density and pressure stay strictly positive on the two problems that stress positivity hardest: the 1D strong shock (10⁵ pressure ratio) and the 2D Sedov point blast.
+- **Conservation.** Total mass and energy are conserved to machine precision (drift ~10⁻¹⁶) while the waves remain inside a transmissive domain — as they must be for a discretely conservative finite-volume scheme with quiescent boundaries.
+
+See [`test.js`](test.js) for the exact tolerances and setups, and [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a case.
 
 ---
 
@@ -165,13 +205,18 @@ The 2D UI (`index2d.html`) is the parallel page to the shock-tube lab: a canvas 
 
 ```
 cfdsolver/
-├── index.html      1D UI: shock tube + nozzle (React via Babel-standalone, canvas + SVG)
-├── index2d.html    2D UI: heatmap + centerline line-outs (React via Babel-standalone)
-├── solver.js       1D shock-tube math: fluxes, MUSCL, SSP-RK2, exact Riemann
-├── nozzle.js       Quasi-1D nozzle math: area source, reservoir + back-pressure BCs,
-│                   isentropic A/A* overlay. Builds on solver.js's flux machinery.
-├── solver2d.js     2D Cartesian Euler: 2D-aware HLLC/HLL/Roe/Rusanov, MUSCL, SSP-RK2
-└── README.md       This file
+├── index.html          1D UI: shock tube + nozzle (React via Babel-standalone, canvas + SVG)
+├── index2d.html        2D UI: heatmap + centerline line-outs (React via Babel-standalone)
+├── solver.js           1D shock-tube math: fluxes, MUSCL, SSP-RK2, exact Riemann
+├── nozzle.js           Quasi-1D nozzle math: area source, reservoir + back-pressure BCs,
+│                       isentropic A/A* overlay. Builds on solver.js's flux machinery.
+├── solver2d.js         2D Cartesian Euler: 2D-aware HLLC/HLL/Roe/Rusanov, MUSCL, SSP-RK2
+├── test.js             Zero-dependency Node verification suite (see Validation)
+├── CONTRIBUTING.md     Contribution guide (the buildless / no-dependency rule)
+├── LICENSE             MIT
+├── docs/               Capture guide for screenshots/GIFs + suggested repo metadata
+├── .github/workflows/  CI: runs `node test.js` on every push and PR
+└── README.md           This file
 ```
 
 `solver.js`, `nozzle.js`, and `solver2d.js` know nothing about the DOM. The HTML files know nothing about HLLC. They communicate through plain JS globals. `nozzle.js` depends on `solver.js` (it reuses `primToCons`, `FLUXES`, `computeRhs`, and `extract`), so when used together `solver.js` must be loaded first. `solver2d.js` is self-contained — it does not import `solver.js`.
