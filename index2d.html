@@ -35,6 +35,16 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+  // Force the classic JSX runtime (React.createElement). Recent @babel/standalone
+  // defaults preset-react to the *automatic* runtime, which emits an
+  // `import ... "react/jsx-runtime"` that a non-module page with UMD React can't
+  // resolve — leaving the page stuck on "Loading...". Registering a classic-runtime
+  // preset keeps everything buildless and dependency-free.
+  Babel.registerPreset('react-classic', {
+    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
+  });
+</script>
 
 <!-- 2D solver (math layer, no DOM). -->
 <script src="solver2d.js"></script>
@@ -46,7 +56,7 @@
   </div>
 </div>
 
-<script type="text/babel" data-presets="react">
+<script type="text/babel" data-presets="react-classic">
 const { useState, useEffect, useMemo, useRef, useCallback } = React;
 
 // ---------- Warm 4-stop perceptual colormap (cream → gold → rust → near-black) ----------
@@ -327,10 +337,38 @@ function App() {
                      viewMode === "Mach"      ? "Mach"     : "density";
 
   return (
-    <div className="grain" style={{
-      minHeight: "100vh", background: "#efe9d8", color: "#1c1a17",
-      fontFamily: "JetBrains Mono, monospace", padding: "24px 22px 36px"
-    }}>
+    <div className="grain" style={{ minHeight: "100vh", background: "#efe9d8", color: "#1c1a17",
+      fontFamily: "JetBrains Mono, monospace" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 0,
+                     borderBottom: "1.5px solid #1c1a17", background: "#efe9d8",
+                     padding: "0 22px", position: "sticky", top: 0, zIndex: 10 }}>
+        <span className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic",
+                     fontSize: 13, color: "#1c1a17", padding: "10px 14px 10px 0" }}>
+          Euler Lab
+        </span>
+        <a href="index.html" className="tablink" style={{ fontSize: 11, letterSpacing: "0.08em",
+                     textTransform: "uppercase", padding: "10px 18px 10px 0", borderBottom: "none" }}>
+          ← 1D Shock Tube + Nozzle
+        </a>
+        <span style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase",
+                     padding: "10px 0", marginLeft: "auto", color: "#8b3a2f", fontWeight: 700,
+                     borderBottom: "2.5px solid #8b3a2f" }}>
+          2D Cartesian
+        </span>
+      </div>
+      <details style={{ padding: "8px 22px 0", fontSize: 11, color: "#5a5547" }}>
+        <summary style={{ cursor: "pointer", letterSpacing: "0.06em", textTransform: "uppercase", fontSize: 10 }}>
+          what am I looking at?
+        </summary>
+        <p style={{ margin: "6px 0 0", maxWidth: 760, lineHeight: 1.5 }}>
+          Full 2D compressible Euler on a Cartesian grid. Pick a <i>preset</i> initial condition
+          (radial Sod, a four-quadrant 2D Riemann problem, the Sedov point blast, or a Kelvin–Helmholtz
+          shear layer), choose a Riemann <i>flux</i>, then <i>run</i> or <i>animate</i>. The heatmap shows
+          the chosen field over the whole grid; the line-outs cut through the x- and y-midlines so you can
+          read wave structure quantitatively. The <b>← 1D</b> link switches to the shock-tube + nozzle lab.
+        </p>
+      </details>
+      <div style={{ padding: "16px 22px 36px" }}>
       <header style={{ borderBottom: "1.5px solid #1c1a17", paddingBottom: 10, marginBottom: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
           <h1 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
@@ -341,7 +379,7 @@ function App() {
         <p style={{ margin: "6px 0 0", fontSize: 11, color: "#5a5547", maxWidth: 760 }}>
           Pick a 2D initial condition, choose a Riemann flux, and time-march. The heatmap renders the
           chosen field across the whole grid; the line-out plots cut through the x- and y-midlines so
-          you can read the wave structure quantitatively. <a className="tablink" href="index.html">switch to 1D shock tube →</a>
+          you can read the wave structure quantitatively.
         </p>
       </header>
 
@@ -464,6 +502,7 @@ function App() {
         <span>dU/dt + dF/dx + dG/dy = 0  {"·"}  U = [rho, rho*u, rho*v, E]  {"·"}  ideal gas</span>
         <span className="smallcaps">finite volume {"·"} 2D cartesian {"·"} transmissive BCs</span>
       </footer>
+      </div>
     </div>
   );
 }
