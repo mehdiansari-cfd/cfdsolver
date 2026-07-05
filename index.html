@@ -33,6 +33,16 @@
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+  // Force the classic JSX runtime (React.createElement). Recent @babel/standalone
+  // defaults preset-react to the *automatic* runtime, which emits an
+  // `import ... "react/jsx-runtime"` that a non-module page with UMD React can't
+  // resolve — leaving the page stuck on "Loading...". Registering a classic-runtime
+  // preset keeps everything buildless and dependency-free.
+  Babel.registerPreset('react-classic', {
+    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
+  });
+</script>
 
 <!-- CFD solver (math layer, no DOM). Must load BEFORE the UI script. -->
 <script src="solver.js"></script>
@@ -46,7 +56,7 @@
 </div>
 
 <!-- UI layer: React components only. Math comes from solver.js globals. -->
-<script type="text/babel" data-presets="react">
+<script type="text/babel" data-presets="react-classic">
 const { useState, useEffect, useMemo, useRef } = React;
 
 // ---------- Canvas tube view (density / pressure / Mach / schlieren) ----------
@@ -409,7 +419,7 @@ function ShockTubeApp() {
         <p style={{ margin: "6px 0 0", fontSize: 11, color: "#5a5547", maxWidth: 720 }}>
           Specify left/right gas states across the diaphragm, then run or animate. The tube view shows
           density inside the tube (dark = dense, light = rarefied) and during animation overlays short
-          streaks tracing the local velocity field. <a href="index2d.html" style={{ color: "#5a5547", borderBottom: "1px dashed #c8c0aa", textDecoration: "none" }}>switch to 2D laboratory →</a>
+          streaks tracing the local velocity field.
         </p>
       </header>
 
@@ -990,13 +1000,33 @@ function App() {
       <div style={{ display: "flex", alignItems: "flex-end", gap: 0,
                      borderBottom: "1.5px solid #1c1a17", background: "#efe9d8",
                      padding: "0 22px", position: "sticky", top: 0, zIndex: 10 }}>
+        <span className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic",
+                     fontSize: 13, color: "#1c1a17", padding: "10px 14px 10px 0", alignSelf: "center" }}>
+          Euler Lab
+        </span>
         <button style={tabStyle(mode === "shocktube")} onClick={() => setMode("shocktube")}>
           Shock Tube
         </button>
         <button style={tabStyle(mode === "nozzle")} onClick={() => setMode("nozzle")}>
           Nozzle Flow
         </button>
+        <a href="index2d.html" style={{ ...tabStyle(false), marginLeft: "auto", textDecoration: "none" }}>
+          2D Laboratory →
+        </a>
       </div>
+      <details style={{ padding: "8px 22px 0", fontSize: 11, color: "#5a5547" }}>
+        <summary style={{ cursor: "pointer", letterSpacing: "0.06em", textTransform: "uppercase", fontSize: 10 }}>
+          what am I looking at?
+        </summary>
+        <p style={{ margin: "6px 0 0", maxWidth: 760, lineHeight: 1.5 }}>
+          A browser-based compressible-flow lab. <b>Shock Tube</b> bursts a diaphragm between two gas
+          states (a Riemann problem) and evolves the shocks, contact, and rarefaction; the dashed grey
+          curve is the exact solution. <b>Nozzle Flow</b> drives a convergent / divergent / CD duct from a
+          reservoir and shows how the flow chokes and forms shocks. Pick a <i>preset</i> to start, choose a
+          Riemann <i>flux</i>, then <i>run</i> or <i>animate</i>. Everything runs client-side — no server, no
+          install. The <b>2D Laboratory →</b> link switches to the two-dimensional version.
+        </p>
+      </details>
       {mode === "shocktube" ? <ShockTubeApp /> : <NozzleApp />}
     </div>
   );
