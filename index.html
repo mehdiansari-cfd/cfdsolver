@@ -7,27 +7,9 @@
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400;1,9..144,600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="lab.css">
 
-<style>
-  html, body { margin: 0; padding: 0; background: #efe9d8; }
-  body { font-family: 'JetBrains Mono', monospace; }
-  .grain { background-image: radial-gradient(rgba(28,26,23,0.04) 1px, transparent 1px); background-size: 3px 3px; }
-  .btn { font-family: 'JetBrains Mono', monospace; font-size: 11px; letter-spacing: 0.08em;
-         text-transform: uppercase; padding: 7px 12px; border: 1px solid #1c1a17;
-         background: #f7f2e3; color: #1c1a17; cursor: pointer;
-         transition: background 120ms, color 120ms; }
-  .btn:hover:not(:disabled) { background: #1c1a17; color: #efe9d8; }
-  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
-  .btn-primary { background: #8b3a2f; border-color: #8b3a2f; color: #efe9d8; }
-  .btn-primary:hover:not(:disabled) { background: #1c1a17; border-color: #1c1a17; color: #efe9d8; }
-  .smallcaps { font-variant: small-caps; letter-spacing: 0.12em; }
-  select { font-family: 'JetBrains Mono', monospace; font-size: 13px; padding: 5px 7px;
-           background: #f7f2e3; border: 1px solid #1c1a17; border-radius: 0; outline: none; color: #1c1a17; }
-  input[type=number]::-webkit-inner-spin-button,
-  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-  input[type=number] { -moz-appearance: textfield; }
-</style>
+
 
 <!-- React + Babel from CDN (UI rendering only) -->
 <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -50,7 +32,7 @@
 </head>
 <body>
 <div id="root">
-  <div style="padding: 40px; font-family: 'JetBrains Mono', monospace; color: #5a5547;">
+  <div style="padding: 40px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; color: #98a0ab;">
     Loading...
   </div>
 </div>
@@ -152,12 +134,12 @@ function TubeView({ result, params, info, mode }) {
     ctx.moveTo(tubeX + tubeW, tubeY - 3); ctx.lineTo(tubeX + tubeW, tubeY + tubeH + 3);
     ctx.stroke();
 
-    ctx.font = "9px JetBrains Mono, monospace";
+    ctx.font = "9px ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
     ctx.fillStyle = "#5a5547";
     ctx.textAlign = "left";  ctx.fillText("x = 0", tubeX, tubeY + tubeH + 11);
     ctx.textAlign = "right"; ctx.fillText("x = " + params.L, tubeX + tubeW, tubeY + tubeH + 11);
     ctx.textAlign = "left";
-    ctx.fillText(label + " \u2208 [" + minV.toFixed(3) + ", " + maxV.toFixed(3) + "]", tubeX, tubeY - 4);
+    ctx.fillText(label + " ∈ [" + minV.toFixed(3) + ", " + maxV.toFixed(3) + "]", tubeX, tubeY - 4);
   }, [result, params, info, mode]);
   return <canvas ref={canvasRef} style={{ width: "100%", height: 120, display: "block", background: "#efe9d8" }} />;
 }
@@ -213,12 +195,12 @@ function Plot({ x, y, label, color, exact }) {
         <path d={exactPath} fill="none" stroke="#5a5547" strokeWidth="1.0" strokeDasharray="3 3" strokeLinejoin="round" opacity="0.85" />
       )}
       <path d={path} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" />
-      <text x={pad.l} y={pad.t - 8} fontFamily="Fraunces, serif" fontSize="13" fontStyle="italic" fill="#1c1a17">{label}</text>
-      <text x={pad.l - 6} y={toY(yHi) + 4} fontFamily="JetBrains Mono, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yHi)}</text>
-      <text x={pad.l - 6} y={toY(yLo) + 4} fontFamily="JetBrains Mono, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yLo)}</text>
-      <text x={toX(xMin)} y={pad.t + ph + 14} fontFamily="JetBrains Mono, monospace" fontSize="9" fill="#5a5547" textAnchor="start">{xMin.toFixed(2)}</text>
-      <text x={toX(xMax)} y={pad.t + ph + 14} fontFamily="JetBrains Mono, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{xMax.toFixed(2)}</text>
-      <text x={pad.l + pw / 2} y={H - 4} fontFamily="JetBrains Mono, monospace" fontSize="9" fill="#5a5547" textAnchor="middle">x</text>
+      <text x={pad.l} y={pad.t - 8} fontFamily="ui-serif, 'Iowan Old Style', Palatino, Georgia, serif" fontSize="13" fontStyle="italic" fill="#1c1a17">{label}</text>
+      <text x={pad.l - 6} y={toY(yHi) + 4} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yHi)}</text>
+      <text x={pad.l - 6} y={toY(yLo) + 4} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yLo)}</text>
+      <text x={toX(xMin)} y={pad.t + ph + 14} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="start">{xMin.toFixed(2)}</text>
+      <text x={toX(xMax)} y={pad.t + ph + 14} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{xMax.toFixed(2)}</text>
+      <text x={pad.l + pw / 2} y={H - 4} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="middle">x</text>
     </svg>
   );
 }
@@ -226,12 +208,12 @@ function Plot({ x, y, label, color, exact }) {
 // ---------- Numeric input field ----------
 function NumField({ label, value, onChange, step }) {
   return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 3, fontFamily: "JetBrains Mono, monospace", fontSize: 11, color: "#1c1a17" }}>
-      <span style={{ letterSpacing: "0.08em", textTransform: "uppercase", color: "#5a5547", fontSize: 9 }}>{label}</span>
+    <label style={{ display: "flex", flexDirection: "column", gap: 3, fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", fontSize: 11, color: "var(--ink)" }}>
+      <span style={{ letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontSize: 9 }}>{label}</span>
       <input type="number" value={value} step={step || 0.1}
         onChange={e => onChange(parseFloat(e.target.value))}
-        style={{ fontFamily: "JetBrains Mono, monospace", fontSize: 13, padding: "5px 7px",
-          background: "#f7f2e3", border: "1px solid #1c1a17", color: "#1c1a17",
+        style={{ fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", fontSize: 13, padding: "5px 7px",
+          background: "var(--field)", border: "1px solid var(--faint)", color: "var(--ink)",
           borderRadius: 0, outline: "none", width: "100%" }} />
     </label>
   );
@@ -406,17 +388,17 @@ function ShockTubeApp() {
 
   return (
     <div className="grain" style={{
-      minHeight: "100vh", background: "#efe9d8", color: "#1c1a17",
-      fontFamily: "JetBrains Mono, monospace", padding: "24px 22px 36px"
+      minHeight: "100vh", background: "var(--bg)", color: "var(--ink)",
+      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", padding: "24px 22px 36px"
     }}>
-      <header style={{ borderBottom: "1.5px solid #1c1a17", paddingBottom: 10, marginBottom: 16 }}>
+      <header style={{ borderBottom: "1.5px solid var(--line)", paddingBottom: 10, marginBottom: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-          <h1 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
-            1D Euler <span style={{ fontStyle: "normal", fontWeight: 400 }}>{"\u00b7 shock tube laboratory"}</span>
+          <h1 style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
+            1D Euler <span style={{ fontStyle: "normal", fontWeight: 400 }}>{"· shock tube laboratory"}</span>
           </h1>
-          <span className="smallcaps" style={{ fontSize: 10, color: "#5a5547" }}>{flux + " \u00b7 MUSCL \u00b7 SSP-RK2"}</span>
+          <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)" }}>{flux + " · MUSCL · SSP-RK2"}</span>
         </div>
-        <p style={{ margin: "6px 0 0", fontSize: 11, color: "#5a5547", maxWidth: 720 }}>
+        <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--muted)", maxWidth: 720 }}>
           Specify left/right gas states across the diaphragm, then run or animate. The tube view shows
           density inside the tube (dark = dense, light = rarefied) and during animation overlays short
           streaks tracing the local velocity field.
@@ -424,15 +406,15 @@ function ShockTubeApp() {
       </header>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, alignItems: "center" }}>
-        <span className="smallcaps" style={{ fontSize: 10, color: "#5a5547", marginRight: 4 }}>{"presets \u203a"}</span>
+        <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)", marginRight: 4 }}>{"presets ›"}</span>
         {Object.keys(PRESETS).map(name => (
           <button key={name} className="btn" onClick={() => loadPreset(name)}>{name}</button>
         ))}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
-        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
             left of diaphragm
           </legend>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
@@ -442,8 +424,8 @@ function ShockTubeApp() {
           </div>
         </fieldset>
 
-        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
             right of diaphragm
           </legend>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
@@ -453,8 +435,8 @@ function ShockTubeApp() {
           </div>
         </fieldset>
 
-        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
             numerics & domain
           </legend>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
@@ -469,10 +451,10 @@ function ShockTubeApp() {
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 14, padding: "10px 12px",
-                     background: "#1c1a17", color: "#efe9d8" }}>
+                     background: "var(--elevated)", color: "var(--ink)", borderRadius: 10 }}>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
           <span>flux</span>
-          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
             <option value="HLLC">HLLC</option>
             <option value="HLL">HLL</option>
             <option value="Roe">Roe</option>
@@ -481,14 +463,14 @@ function ShockTubeApp() {
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
           <span>BCs</span>
-          <select value={bcType} onChange={e => setBcType(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+          <select value={bcType} onChange={e => setBcType(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
             <option value="transmissive">transmissive</option>
             <option value="reflective">reflective</option>
           </select>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
           <span>tube</span>
-          <select value={tubeMode} onChange={e => setTubeMode(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+          <select value={tubeMode} onChange={e => setTubeMode(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
             <option value="density">density</option>
             <option value="schlieren">schlieren</option>
             <option value="pressure">pressure</option>
@@ -496,84 +478,84 @@ function ShockTubeApp() {
           </select>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
-          <input type="checkbox" checked={overlay} onChange={e => setOverlay(e.target.checked)} style={{ accentColor: "#8b3a2f" }} />
+          <input type="checkbox" checked={overlay} onChange={e => setOverlay(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
           <span>exact overlay</span>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
-          <input type="checkbox" checked={showDerived} onChange={e => setShowDerived(e.target.checked)} style={{ accentColor: "#8b3a2f" }} />
+          <input type="checkbox" checked={showDerived} onChange={e => setShowDerived(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
           <span>derived fields</span>
         </label>
         <button className="btn btn-primary" onClick={runFinal} disabled={busy || animating}>
           {busy ? "computing..." : "run to t_end"}
         </button>
         <button className="btn" onClick={animate} disabled={busy || animating}
-                style={{ background: animating ? "#8b3a2f" : "#efe9d8", color: animating ? "#efe9d8" : "#1c1a17" }}>
+                style={{ background: animating ? "var(--accent-2)" : "var(--field)", color: animating ? "var(--accent-ink)" : "var(--ink)" }}>
           {animating ? "animating..." : "animate flow"}
         </button>
-        {animating && <button className="btn" onClick={stopAnim} style={{ background: "#efe9d8", color: "#1c1a17" }}>stop</button>}
+        {animating && <button className="btn" onClick={stopAnim} style={{ background: "var(--field)", color: "var(--ink)" }}>stop</button>}
 
-        <div style={{ marginLeft: "auto", fontSize: 11, display: "flex", gap: 18, color: "#efe9d8" }}>
-          <span><span style={{ color: "#a8a297" }}>t = </span>{info.t.toFixed(4)}</span>
-          <span><span style={{ color: "#a8a297" }}>steps = </span>{info.step}</span>
-          <span><span style={{ color: "#a8a297" }}>wall = </span>{info.ms.toFixed(0)} ms</span>
+        <div style={{ marginLeft: "auto", fontSize: 11, display: "flex", gap: 18, color: "var(--ink)" }}>
+          <span><span style={{ color: "var(--muted)" }}>t = </span>{info.t.toFixed(4)}</span>
+          <span><span style={{ color: "var(--muted)" }}>steps = </span>{info.step}</span>
+          <span><span style={{ color: "var(--muted)" }}>wall = </span>{info.ms.toFixed(0)} ms</span>
         </div>
       </div>
 
       {err && (
-        <div style={{ padding: "8px 12px", border: "1px solid #8b3a2f", background: "#f7e4df", color: "#8b3a2f",
+        <div style={{ padding: "8px 12px", border: "1px solid var(--danger)", background: "var(--danger-bg)", color: "var(--accent)",
                         fontSize: 11, marginBottom: 12 }}>
           ! {err}
         </div>
       )}
 
       <div style={{ marginBottom: 14 }}>
-        <div className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, color: "#1c1a17", marginBottom: 4 }}>
-          inside the tube {"\u00b7 " + (
+        <div className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, color: "var(--ink)", marginBottom: 4 }}>
+          inside the tube {"· " + (
             tubeMode === "schlieren" ? "schlieren (|drho/dx|)" :
             tubeMode === "pressure" ? "pressure field" :
             tubeMode === "Mach" ? "Mach field" : "density field"
           )}{hasStreaks ? " + velocity streaks" : ""}
         </div>
-        <div style={{ border: "1px solid #1c1a17" }}>
+        <div style={{ border: "1px solid var(--faint)" }}>
           {result && <TubeView result={result} params={params} info={info} mode={tubeMode} />}
         </div>
       </div>
 
       {result && (
-        <div style={{ background: "#1c1a17", padding: 14 }}>
+        <div style={{ background: "var(--elevated)", padding: 14, borderRadius: 12 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 14 }}>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.rho} label="density rho(x)" color={C.rho}
                     exact={exact ? exact.rho : null} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.u}   label="velocity u(x)"  color={C.u}
                     exact={exact ? exact.u : null} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.p}   label="pressure p(x)"  color={C.p}
                     exact={exact ? exact.p : null} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.e}   label="internal energy e(x)" color={C.e}
                     exact={exactDerived ? exactDerived.e : null} />
             </div>
           </div>
           {showDerived && (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 14, marginTop: 14 }}>
-              <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
                 <Plot x={result.x} y={result.M} label="Mach M(x)" color={C.M}
                       exact={exactDerived ? exactDerived.M : null} />
               </div>
-              <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
                 <Plot x={result.x} y={result.T} label="temperature T(x)" color={C.T}
                       exact={exactDerived ? exactDerived.T : null} />
               </div>
-              <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
                 <Plot x={result.x} y={result.s} label="entropy s(x)" color={C.s}
                       exact={exactDerived ? exactDerived.s : null} />
               </div>
-              <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+              <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
                 <Plot x={result.x} y={result.a} label="sound speed a(x)" color={C.a}
                       exact={exactDerived ? exactDerived.a : null} />
               </div>
@@ -582,10 +564,10 @@ function ShockTubeApp() {
         </div>
       )}
 
-      <footer style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid #c8c0aa", fontSize: 10, color: "#5a5547",
+      <footer style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid var(--line)", fontSize: 10, color: "var(--muted)",
                         display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-        <span>dU/dt + dF(U)/dx = 0  {"\u00b7"}  U = [rho, rho*u, E]  {"\u00b7"}  E = p/(gamma-1) + (1/2)*rho*u^2</span>
-        <span className="smallcaps">finite volume {"\u00b7"} 1D {"\u00b7"} ideal gas</span>
+        <span>dU/dt + dF(U)/dx = 0  {"·"}  U = [rho, rho*u, E]  {"·"}  E = p/(gamma-1) + (1/2)*rho*u^2</span>
+        <span className="smallcaps">finite volume {"·"} 1D {"·"} ideal gas</span>
       </footer>
     </div>
   );
@@ -695,7 +677,7 @@ function NozzleView({ result, nozzleState, mode }) {
     }
 
     // Labels
-    ctx.font = "9px JetBrains Mono, monospace"; ctx.fillStyle = "#5a5547";
+    ctx.font = "9px ui-monospace, 'SF Mono', Menlo, Consolas, monospace"; ctx.fillStyle = "#5a5547";
     ctx.textAlign = "left";
     ctx.fillText(label + " ∈ [" + minV.toFixed(3) + ", " + maxV.toFixed(3) + "]", padX, padY - 5);
     ctx.textAlign = "center";
@@ -806,16 +788,16 @@ function NozzleApp() {
   const C = { M: "#a4632a", p: "#4a5d23", T: "#5d4037", rho: "#8b3a2f", pt: "#2d5d6e" };
 
   return (
-    <div className="grain" style={{ minHeight: "100vh", background: "#efe9d8", color: "#1c1a17",
-      fontFamily: "JetBrains Mono, monospace", padding: "24px 22px 36px" }}>
-      <header style={{ borderBottom: "1.5px solid #1c1a17", paddingBottom: 10, marginBottom: 16 }}>
+    <div className="grain" style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--ink)",
+      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", padding: "24px 22px 36px" }}>
+      <header style={{ borderBottom: "1.5px solid var(--line)", paddingBottom: 10, marginBottom: 16 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-          <h1 style={{ fontFamily: "Fraunces, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
+          <h1 style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
             Quasi-1D Nozzle <span style={{ fontStyle: "normal", fontWeight: 400 }}>{"· Euler flow"}</span>
           </h1>
-          <span className="smallcaps" style={{ fontSize: 10, color: "#5a5547" }}>{flux + " · MUSCL · SSP-RK2"}</span>
+          <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)" }}>{flux + " · MUSCL · SSP-RK2"}</span>
         </div>
-        <p style={{ margin: "6px 0 0", fontSize: 11, color: "#5a5547", maxWidth: 720 }}>
+        <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--muted)", maxWidth: 720 }}>
           Variable-area duct with isentropic reservoir inlet and back-pressure exit.
           Switch nozzle type to compare convergent, divergent, and CD (converging-diverging) flows.
           The dashed overlay shows the analytical isentropic solution for reference.
@@ -823,12 +805,12 @@ function NozzleApp() {
       </header>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, alignItems: "center" }}>
-        <span className="smallcaps" style={{ fontSize: 10, color: "#5a5547", marginRight: 4 }}>{"presets ›"}</span>
+        <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)", marginRight: 4 }}>{"presets ›"}</span>
         {Object.keys(NOZZLE_PRESETS).map(name => (
           <button key={name} className="btn"
-            style={{ background: preset === name ? "#8b3a2f" : "#f7f2e3",
-                     color: preset === name ? "#efe9d8" : "#1c1a17",
-                     borderColor: preset === name ? "#8b3a2f" : "#1c1a17" }}
+            style={{ background: preset === name ? "var(--accent)" : "var(--field)",
+                     color: preset === name ? "var(--accent-ink)" : "var(--ink)",
+                     borderColor: preset === name ? "var(--accent)" : "var(--faint)" }}
             onClick={() => { loadPreset(name); }}>
             {name}
           </button>
@@ -836,13 +818,13 @@ function NozzleApp() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
-        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
             nozzle geometry
           </legend>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11, color: "#1c1a17" }}>
-              <span style={{ letterSpacing: "0.08em", textTransform: "uppercase", color: "#5a5547", fontSize: 9 }}>type</span>
+            <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11, color: "var(--ink)" }}>
+              <span style={{ letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontSize: 9 }}>type</span>
               <select value={nozzType} onChange={e => setNozzType(e.target.value)}>
                 <option value="convergent">Convergent</option>
                 <option value="divergent">Divergent</option>
@@ -853,8 +835,8 @@ function NozzleApp() {
           </div>
         </fieldset>
 
-        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
             boundary conditions
           </legend>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
@@ -862,14 +844,14 @@ function NozzleApp() {
             <NumField label="T₀ inlet"  value={T0} onChange={setT0} step={0.05} />
             <NumField label="pᵇ exit"   value={pb} onChange={setPb} step={0.01} />
           </div>
-          <div style={{ marginTop: 8, fontSize: 10, color: "#5a5547" }}>
+          <div style={{ marginTop: 8, fontSize: 10, color: "var(--muted)" }}>
             {"pᵇ / p₀ = " + (pb / Math.max(p0, 1e-9)).toFixed(4)}
             {" · p*/p₀ = " + Math.pow(2 / (gamma + 1), gamma / (gamma - 1)).toFixed(4)}
           </div>
         </fieldset>
 
-        <fieldset style={{ border: "1px solid #1c1a17", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
+        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
+          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
             numerics & domain
           </legend>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
@@ -883,10 +865,10 @@ function NozzleApp() {
       </div>
 
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 14, padding: "10px 12px",
-                     background: "#1c1a17", color: "#efe9d8" }}>
+                     background: "var(--elevated)", color: "var(--ink)", borderRadius: 10 }}>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
           <span>flux</span>
-          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
             <option value="HLLC">HLLC</option>
             <option value="HLL">HLL</option>
             <option value="Roe">Roe</option>
@@ -895,7 +877,7 @@ function NozzleApp() {
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
           <span>view</span>
-          <select value={tubeMode} onChange={e => setTubeMode(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+          <select value={tubeMode} onChange={e => setTubeMode(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
             <option value="Mach">Mach</option>
             <option value="pressure">pressure</option>
             <option value="temp">temperature</option>
@@ -904,68 +886,68 @@ function NozzleApp() {
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
           <span>overlay</span>
-          <select value={branch} onChange={e => setBranch(e.target.value)} style={{ background: "#efe9d8", color: "#1c1a17" }}>
+          <select value={branch} onChange={e => setBranch(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
             <option value="subsonic">isentropic subsonic</option>
             <option value="supersonic">isentropic supersonic</option>
           </select>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
-          <input type="checkbox" checked={showIso} onChange={e => setShowIso(e.target.checked)} style={{ accentColor: "#8b3a2f" }} />
+          <input type="checkbox" checked={showIso} onChange={e => setShowIso(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
           <span>isentropic overlay</span>
         </label>
         <button className="btn btn-primary" onClick={() => runFinal()} disabled={busy || animating}>
           {busy ? "computing..." : "run to t_end"}
         </button>
         <button className="btn" onClick={animate} disabled={busy || animating}
-                style={{ background: animating ? "#8b3a2f" : "#efe9d8", color: animating ? "#efe9d8" : "#1c1a17" }}>
+                style={{ background: animating ? "var(--accent-2)" : "var(--field)", color: animating ? "var(--accent-ink)" : "var(--ink)" }}>
           {animating ? "animating..." : "animate flow"}
         </button>
-        {animating && <button className="btn" onClick={stopAnim} style={{ background: "#efe9d8", color: "#1c1a17" }}>stop</button>}
-        <div style={{ marginLeft: "auto", fontSize: 11, display: "flex", gap: 18, color: "#efe9d8" }}>
-          <span><span style={{ color: "#a8a297" }}>t = </span>{info.t.toFixed(4)}</span>
-          <span><span style={{ color: "#a8a297" }}>steps = </span>{info.step}</span>
-          <span><span style={{ color: "#a8a297" }}>wall = </span>{info.ms.toFixed(0)} ms</span>
+        {animating && <button className="btn" onClick={stopAnim} style={{ background: "var(--field)", color: "var(--ink)" }}>stop</button>}
+        <div style={{ marginLeft: "auto", fontSize: 11, display: "flex", gap: 18, color: "var(--ink)" }}>
+          <span><span style={{ color: "var(--muted)" }}>t = </span>{info.t.toFixed(4)}</span>
+          <span><span style={{ color: "var(--muted)" }}>steps = </span>{info.step}</span>
+          <span><span style={{ color: "var(--muted)" }}>wall = </span>{info.ms.toFixed(0)} ms</span>
         </div>
       </div>
 
       {err && (
-        <div style={{ padding: "8px 12px", border: "1px solid #8b3a2f", background: "#f7e4df",
-                       color: "#8b3a2f", fontSize: 11, marginBottom: 12 }}>! {err}</div>
+        <div style={{ padding: "8px 12px", border: "1px solid var(--danger)", background: "var(--danger-bg)",
+                       color: "var(--accent)", fontSize: 11, marginBottom: 12 }}>! {err}</div>
       )}
 
       <div style={{ marginBottom: 14 }}>
-        <div className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic", fontSize: 13, color: "#1c1a17", marginBottom: 4 }}>
+        <div className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, color: "var(--ink)", marginBottom: 4 }}>
           {(nozzType === "CD" ? "converging-diverging" : nozzType) + " nozzle · " + (
             tubeMode === "pressure" ? "pressure field" :
             tubeMode === "temp"     ? "temperature field" :
             tubeMode === "Mach"     ? "Mach field" : "density field"
           )}
         </div>
-        <div style={{ border: "1px solid #1c1a17" }}>
+        <div style={{ border: "1px solid var(--faint)" }}>
           {result && nozzleState && <NozzleView result={result} nozzleState={nozzleState} mode={tubeMode} />}
         </div>
       </div>
 
       {result && (
-        <div style={{ background: "#1c1a17", padding: 14 }}>
+        <div style={{ background: "var(--elevated)", padding: 14, borderRadius: 12 }}>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 14 }}>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.M}   label="Mach M(x)"          color={C.M}
                     exact={isoResult && showIso ? isoResult.M   : null} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.p}   label="pressure p(x)"      color={C.p}
                     exact={isoResult && showIso ? isoResult.p   : null} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.T}   label="temperature T(x)"   color={C.T}
                     exact={isoResult && showIso ? isoResult.T   : null} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.rho} label="density ρ(x)"  color={C.rho}
                     exact={isoResult && showIso ? isoResult.rho : null} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 0" }}>
+            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
               <Plot x={result.x} y={result.pt}  label="total pressure pₜ(x)" color={C.pt}
                     exact={isoResult && showIso ? isoResult.pt  : null} />
             </div>
@@ -973,7 +955,7 @@ function NozzleApp() {
         </div>
       )}
 
-      <footer style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid #c8c0aa", fontSize: 10, color: "#5a5547",
+      <footer style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid var(--line)", fontSize: 10, color: "var(--muted)",
                         display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
         <span>dU/dt + dF/dx = H  {"·"}  H = -(dA/dx)/A [0, ρu², u(E+p)]  {"·"}  A_throat = 1</span>
         <span className="smallcaps">quasi-1D {"·"} isentropic reservoir BC {"·"} ideal gas</span>
@@ -986,22 +968,22 @@ function NozzleApp() {
 function App() {
   const [mode, setMode] = useState("shocktube");
   const tabStyle = active => ({
-    fontFamily: "JetBrains Mono, monospace",
+    fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
     fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase",
     padding: "10px 18px", border: "none", cursor: "pointer",
-    borderBottom: active ? "2.5px solid #8b3a2f" : "2.5px solid transparent",
+    borderBottom: active ? "2.5px solid var(--accent)" : "2.5px solid transparent",
     background: "transparent",
-    color: active ? "#8b3a2f" : "#5a5547",
+    color: active ? "var(--accent)" : "var(--muted)",
     fontWeight: active ? 700 : 400,
     transition: "color 120ms"
   });
   return (
     <div style={{ background: "#efe9d8", minHeight: "100vh" }}>
       <div style={{ display: "flex", alignItems: "flex-end", gap: 0,
-                     borderBottom: "1.5px solid #1c1a17", background: "#efe9d8",
+                     borderBottom: "1.5px solid var(--line)", background: "var(--surface)",
                      padding: "0 22px", position: "sticky", top: 0, zIndex: 10 }}>
-        <span className="smallcaps" style={{ fontFamily: "Fraunces, serif", fontStyle: "italic",
-                     fontSize: 13, color: "#1c1a17", padding: "10px 14px 10px 0", alignSelf: "center" }}>
+        <span className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic",
+                     fontSize: 13, color: "var(--ink)", padding: "10px 14px 10px 0", alignSelf: "center" }}>
           Euler Lab
         </span>
         <button style={tabStyle(mode === "shocktube")} onClick={() => setMode("shocktube")}>
@@ -1014,7 +996,7 @@ function App() {
           2D Laboratory →
         </a>
       </div>
-      <details style={{ padding: "8px 22px 0", fontSize: 11, color: "#5a5547" }}>
+      <details style={{ padding: "8px 22px 0", fontSize: 11, color: "#E7E9EC", backgroundColor: "#14161A" }}>
         <summary style={{ cursor: "pointer", letterSpacing: "0.06em", textTransform: "uppercase", fontSize: 10 }}>
           what am I looking at?
         </summary>
@@ -1032,8 +1014,28 @@ function App() {
   );
 }
 
-const root = ReactDOM.createRoot(document.getElementById("root"));
-root.render(<App />);
+if (!window.__eulerRoot) {
+  window.__eulerRoot = ReactDOM.createRoot(document.getElementById("root"));
+}
+window.__eulerRoot.render(<App />);
+</script>
+
+<!-- Resilience net (additive, cosmetic-neutral): if @babel/standalone finishes
+     loading AFTER DOMContentLoaded, its automatic transform of the text/babel
+     script never fires and the page stays on "Loading...". Kick it manually.
+     No-op on the normal path (guarded on the "Loading" placeholder). -->
+<script>
+(function ensureBabelRuns(tries){
+  var root = document.getElementById('root');
+  if (!root) return;
+  if (/Loading\.\.\./.test(root.textContent) && window.Babel && window.React && window.ReactDOM) {
+    try { window.Babel.transformScriptTags(); } catch (e) {}
+  }
+  root = document.getElementById('root');
+  if (root && /Loading\.\.\./.test(root.textContent) && tries < 60) {
+    setTimeout(function(){ ensureBabelRuns(tries + 1); }, 120);
+  }
+})(0);
 </script>
 </body>
 </html>

@@ -1,0 +1,205 @@
+/* ============================================================
+   Euler Laboratory — shared instrument-panel skin
+   Cosmetic only. Linked from index.html and index2d.html.
+   All colours are :root variables so the theme is easy to tweak.
+   Physics "screens" (tube / nozzle / heatmap / plots) keep their
+   own cream palette in the JS and are intentionally NOT themed here.
+   ============================================================ */
+
+:root {
+  /* surfaces (dark chassis) */
+  --bg:         #14161a;   /* page background            */
+  --surface:    #1b1e24;   /* grouped control cards / nav */
+  --surface-2:  #21252c;   /* raised chips               */
+  --field:      #23272f;   /* inputs, selects            */
+  --elevated:   #0e1013;   /* control rail + plot backdrop (darkest) */
+
+  /* ink */
+  --ink:        #e7e9ec;   /* primary text               */
+  --muted:      #98a0ab;   /* secondary / labels         */
+  --faint:      #333a44;   /* card & input borders       */
+  --line:       #2a3038;   /* hairline separators        */
+
+  /* accents (harmonise with the cream→gold→rust colormap) */
+  --accent:     #e2724b;   /* rust primary               */
+  --accent-hi:  #ef8763;   /* rust hover                 */
+  --accent-ink: #17110d;   /* text on accent             */
+  --accent-2:   #d7a33c;   /* amber — live / running     */
+  --danger:     #e2724b;
+  --danger-bg:  #2b1a15;
+
+  /* system font stacks — no downloads */
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
+  --font-display: ui-serif, 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, 'Times New Roman', serif;
+
+  /* spacing / shape scale */
+  --r-sm: 6px;
+  --r-md: 9px;
+  --r-lg: 12px;
+  --shadow: 0 1px 0 rgba(255,255,255,0.03), 0 8px 24px rgba(0,0,0,0.35);
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--ink);
+}
+body {
+  font-family: var(--font-mono);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: rgba(226,114,75,0.30); }
+
+/* faint instrument grain over the dark chassis */
+.grain {
+  background-image: radial-gradient(rgba(255,255,255,0.028) 1px, transparent 1px);
+  background-size: 3px 3px;
+}
+
+.smallcaps { font-variant: small-caps; letter-spacing: 0.12em; }
+
+/* ---------------- Buttons ---------------- */
+.btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 8px 13px;
+  border: 1px solid var(--faint);
+  border-radius: var(--r-sm);
+  background: var(--field);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 130ms ease, color 130ms ease,
+              border-color 130ms ease, transform 60ms ease, box-shadow 130ms ease;
+}
+.btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: #4a525e;
+  color: #fff;
+}
+.btn:active:not(:disabled) { transform: translateY(1px); }
+.btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(226,114,75,0.30);
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  box-shadow: 0 2px 10px rgba(226,114,75,0.28);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hi);
+  border-color: var(--accent-hi);
+  color: var(--accent-ink);
+}
+
+/* ---------------- Selects ---------------- */
+select {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 6px 26px 6px 9px;
+  background-color: var(--field);
+  color: var(--ink);
+  border: 1px solid var(--faint);
+  border-radius: var(--r-sm);
+  outline: none;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'><path d='M1 1l4 4 4-4' fill='none' stroke='%2398a0ab' stroke-width='1.4' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  transition: border-color 130ms ease, box-shadow 130ms ease;
+}
+select:hover { border-color: #4a525e; }
+select:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(226,114,75,0.28);
+}
+select option { background: var(--field); color: var(--ink); }
+
+/* ---------------- Number inputs ---------------- */
+input[type=number] {
+  transition: border-color 130ms ease, box-shadow 130ms ease, background 130ms ease;
+}
+input[type=number]:hover { border-color: #4a525e !important; }
+input[type=number]:focus-visible {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 3px rgba(226,114,75,0.26);
+}
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }
+
+/* ---------------- Checkboxes ---------------- */
+input[type=checkbox] {
+  accent-color: var(--accent);
+  width: 14px; height: 14px;
+  cursor: pointer;
+}
+
+/* ---------------- Range sliders (styled for completeness) ---------------- */
+input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 3px;
+  background: var(--line);
+  outline: none;
+  cursor: pointer;
+}
+input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 15px; height: 15px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}
+input[type=range]::-moz-range-thumb {
+  width: 15px; height: 15px;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* ---------------- Grouped control cards (fieldsets) ---------------- */
+fieldset {
+  background: var(--surface);
+  border-radius: var(--r-lg) !important;
+  box-shadow: var(--shadow);
+}
+legend { color: var(--muted); }
+
+/* ---------------- Tab links ---------------- */
+a.tablink {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px dashed var(--faint);
+  transition: color 130ms ease, border-color 130ms ease;
+}
+a.tablink:hover { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ---------------- Disclosure ---------------- */
+details summary { color: var(--muted); }
+details summary:hover { color: var(--ink); }
+
+/* ---------------- Scrollbar ---------------- */
+* { scrollbar-color: var(--faint) var(--bg); }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb {
+  background: var(--faint);
+  border-radius: 8px;
+  border: 3px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover { background: #454d59; }
