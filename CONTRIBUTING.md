@@ -28,11 +28,13 @@ the case — the default answer is "keep it vanilla."
 | `solver2d.js`  | 2D Cartesian Euler. Self-contained. No DOM. |
 | `index.html`   | 1D UI (shock tube + nozzle). React via Babel-standalone. |
 | `index2d.html` | 2D UI. |
+| `labui.js`     | Shared UI layer: playback engine, canvas plots, controls. No math. |
+| `lab.css`      | Shared stylesheet. |
 | `test.js`      | Zero-dependency Node verification suite. |
 
 The math layers know nothing about the DOM; the HTML knows nothing about HLLC.
 They communicate through plain JS globals (and CommonJS exports for Node).
-`nozzle.js` reuses `solver.js` globals, so `solver.js` must load first.
+`nozzle.js` reuses `solver.js` globals, so in the browser `solver.js` must load first (in Node, `nozzle.js` requires it itself).
 
 ## Style
 

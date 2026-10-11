@@ -18,6 +18,7 @@
      - minmod(a, b)
      - applyBcs(rho, mom, ene, bcType)            'transmissive' | 'reflective'
      - computeRhs(rho, mom, ene, N, dx, gamma, fluxFn)
+     - stableDt(state)                             CFL-limited time step
      - initState(params)                          params.flux ('HLLC' | 'HLL' | 'Roe' | 'Rusanov')
      - stepUntil(state, tTarget)
      - extract(state)                              -> { x, rho, u, p, e, M, T, s, a }
@@ -251,6 +252,23 @@ function initState(p) {
   };
 }
 
+// ---------- Stable time step from the CFL condition ----------
+// dt = CFL * dx / max_i(|u_i| + a_i) over the interior cells. Recomputed every
+// step, since wave speeds change as shocks form (CLAUDE.md §8.6). Works for any
+// state with { rho, mom, ene, N, dx, gamma, cfl } — the nozzle reuses it.
+function stableDt(state) {
+  const { rho, mom, ene, N, dx, gamma, cfl } = state;
+  let maxSpeed = 0;
+  for (let i = 2; i < N + 2; i++) {
+    const u = mom[i] / rho[i];
+    const p = (gamma - 1) * (ene[i] - 0.5 * rho[i] * u * u);
+    const a = Math.sqrt(gamma * Math.max(p, 1e-12) / Math.max(rho[i], 1e-12));
+    const s = Math.abs(u) + a;
+    if (s > maxSpeed) maxSpeed = s;
+  }
+  return cfl * dx / maxSpeed;
+}
+
 // ---------- Step forward in time to tTarget (SSP-RK2 + adaptive CFL) ----------
 function stepUntil(state, tTarget) {
   const { N, dx, gamma, bcType, cfl } = state;
@@ -258,15 +276,7 @@ function stepUntil(state, tTarget) {
   let { rho, mom, ene, t, step } = state;
   let budget = 5000; // safety cap per call
   while (t < tTarget && budget-- > 0) {
-    let maxSpeed = 0;
-    for (let i = 2; i < N + 2; i++) {
-      const u = mom[i] / rho[i];
-      const p = (gamma - 1) * (ene[i] - 0.5 * rho[i] * u * u);
-      const a = Math.sqrt(gamma * Math.max(p, 1e-12) / Math.max(rho[i], 1e-12));
-      const s = Math.abs(u) + a;
-      if (s > maxSpeed) maxSpeed = s;
-    }
-    let dt = cfl * dx / maxSpeed;
+    let dt = stableDt({ rho, mom, ene, N, dx, gamma, cfl });
     if (t + dt > tTarget) dt = tTarget - t;
 
     // Stage 1
@@ -454,7 +464,7 @@ if (typeof module !== "undefined" && module.exports) {
     primToCons, fluxFromCons,
     hllc, hll, roe, rusanov, FLUXES,
     minmod, applyBcs,
-    computeRhs, initState, stepUntil, extract, localVelocity,
+    computeRhs, stableDt, initState, stepUntil, extract, localVelocity,
     exactRiemann,
     PRESETS
   };

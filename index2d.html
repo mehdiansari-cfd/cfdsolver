@@ -3,509 +3,383 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>2D Euler Laboratory</title>
-
+<title>Euler Lab · 2D</title>
 <link rel="stylesheet" href="lab.css">
 
-<!-- React + Babel from CDN -->
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<!-- React + Babel from CDN (UI rendering only). Versions are pinned so an
+     upstream release can never change or break the page. -->
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 <script>
-  // Force the classic JSX runtime (React.createElement). Recent @babel/standalone
-  // defaults preset-react to the *automatic* runtime, which emits an
-  // `import ... "react/jsx-runtime"` that a non-module page with UMD React can't
-  // resolve — leaving the page stuck on "Loading...". Registering a classic-runtime
-  // preset keeps everything buildless and dependency-free.
+  // Force the classic JSX runtime (React.createElement). The automatic runtime
+  // emits `import ... "react/jsx-runtime"`, which a non-module page with UMD
+  // React can't resolve — leaving the page stuck on "Loading...".
   Babel.registerPreset('react-classic', {
     presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
   });
 </script>
 
-<!-- 2D solver (math layer, no DOM). -->
+<!-- Shared UI layer (playback engine, plots, controls). Needs React. -->
+<script src="labui.js"></script>
+<!-- 2D CFD solver (math layer, no DOM). Self-contained. -->
 <script src="solver2d.js"></script>
 </head>
 <body>
-<div id="root">
-  <div style="padding: 40px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; color: #98a0ab;">
-    Loading...
-  </div>
-</div>
+<div id="root"><div class="boot">Loading...</div></div>
 
+<!-- UI layer: React components only. Math comes from solver2d.js globals. -->
 <script type="text/babel" data-presets="react-classic">
-const { useState, useEffect, useMemo, useRef, useCallback } = React;
+window.__eulerBooted = true;
+const { useState, useEffect, useMemo, useRef } = React;
+const {
+  fmt, CMAP, useCanvas, useSmoothRange, finiteRange, usePlayer, useShortcuts,
+  NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe
+} = LabUI;
 
-// ---------- Warm 4-stop perceptual colormap (cream → gold → rust → near-black) ----------
-// Matches the existing 1D lab's palette. norm in [0, 1].
-const STOPS = [
-  [247, 242, 227],
-  [218, 178,  98],
-  [173,  88,  62],
-  [ 50,  34,  30]
-];
-function colormap(norm, out, offset) {
-  const t = Math.max(0, Math.min(1, norm));
-  const seg = t * 3;
-  const i = Math.min(2, Math.floor(seg));
-  const f = seg - i;
-  const a = STOPS[i], b = STOPS[i + 1];
-  out[offset    ] = a[0] + (b[0] - a[0]) * f;
-  out[offset + 1] = a[1] + (b[1] - a[1]) * f;
-  out[offset + 2] = a[2] + (b[2] - a[2]) * f;
-  out[offset + 3] = 255;
+const FLUX_OPTIONS = ["HLLC", "HLL", "Roe", "Rusanov"];
+const CFL_SAFE = 0.5;
+// Recorded frames are Float32 copies of the four ghosted conserved arrays.
+// Cap their total memory so big grids get fewer (not slower) frames.
+const FRAME_MEMORY_BYTES = 96e6;
+const MAX_FRAMES_2D = 200, MIN_FRAMES_2D = 24;
+
+function framesFor(Nx, Ny) {
+  const bytes = 4 * 4 * (Nx + 4) * (Ny + 4);
+  return Math.max(MIN_FRAMES_2D, Math.min(MAX_FRAMES_2D, Math.floor(FRAME_MEMORY_BYTES / bytes)));
+}
+const record2D = s => ({ rho: new Float32Array(s.rho), mu: new Float32Array(s.mu),
+                         mv: new Float32Array(s.mv), E: new Float32Array(s.E) });
+
+function check2D(s) {
+  const { rho, mu, mv, E, Nx, Ny, gamma } = s, Nxt = Nx + 4;
+  for (let j = 2; j < Ny + 2; j++) {
+    for (let i = 2, k = j * Nxt + 2; i < Nx + 2; i++, k++) {
+      const r = rho[k];
+      if (!(r > 0)) return "Density became non-positive or NaN";
+      if (!((gamma - 1) * (E[k] - 0.5 * (mu[k] * mu[k] + mv[k] * mv[k]) / r) > 0)) return "Pressure became negative or NaN";
+    }
+  }
+  return null;
 }
 
-// ---------- 2D heatmap on a canvas ----------
-function Heatmap({ result, mode, busy }) {
-  const canvasRef = useRef(null);
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv || !result) return;
-    const { Nx, Ny } = result;
-
-    // Pick the field according to view mode.
-    let field, label;
-    if (mode === "pressure") { field = result.p;  label = "p"; }
-    else if (mode === "Mach")     { field = result.M;  label = "M"; }
-    else if (mode === "schlieren") {
-      // sqrt(|∇rho|^2) on the interior with one-sided differences at the edges.
-      const f = new Float64Array(Nx * Ny);
-      for (let j = 0; j < Ny; j++) {
-        for (let i = 0; i < Nx; i++) {
-          const iL = Math.max(0, i - 1), iR = Math.min(Nx - 1, i + 1);
-          const jB = Math.max(0, j - 1), jT = Math.min(Ny - 1, j + 1);
-          const gx = result.rho[j * Nx + iR] - result.rho[j * Nx + iL];
-          const gy = result.rho[jT * Nx + i] - result.rho[jB * Nx + i];
-          f[j * Nx + i] = Math.sqrt(Math.sqrt(gx * gx + gy * gy));
-        }
-      }
-      field = f; label = "|∇ρ|";
-    } else { field = result.rho; label = "ρ"; }
-
-    let minV = Infinity, maxV = -Infinity;
-    for (let k = 0; k < field.length; k++) {
-      if (field[k] < minV) minV = field[k];
-      if (field[k] > maxV) maxV = field[k];
+// |∇ρ|^(1/2): numerical schlieren with one-sided differences at the edges.
+function schlieren2D(sol) {
+  const { Nx, Ny, rho } = sol, f = new Float64Array(Nx * Ny);
+  for (let j = 0; j < Ny; j++) {
+    const jB = Math.max(0, j - 1), jT = Math.min(Ny - 1, j + 1);
+    for (let i = 0; i < Nx; i++) {
+      const iL = Math.max(0, i - 1), iR = Math.min(Nx - 1, i + 1);
+      const gx = rho[j * Nx + iR] - rho[j * Nx + iL];
+      const gy = rho[jT * Nx + i] - rho[jB * Nx + i];
+      f[j * Nx + i] = Math.sqrt(Math.sqrt(gx * gx + gy * gy));
     }
-    const range = Math.max(maxV - minV, 1e-12);
+  }
+  return f;
+}
 
-    // Render the heatmap as ImageData. Pixel-perfect mapping: 1 grid cell = 1 pixel.
-    cv.width = Nx; cv.height = Ny;
-    const ctx = cv.getContext("2d");
-    const img = ctx.createImageData(Nx, Ny);
-    const data = img.data;
-    // Flip y so that increasing j goes upward in the displayed image.
+// ============================================================
+// Heatmap: one texel per cell, scaled to fit with optional bilinear
+// smoothing; dashed cut lines show where the line-outs are taken.
+// Click to move the cuts; hover to probe.
+// ============================================================
+function Heatmap({ sol, field, lo, hi, Lx, Ly, smooth, cut, hover, onHover, onCut }) {
+  const geo = useRef(null);
+  const off = useRef(null);
+  const ref = useCanvas((ctx, W, H) => {
+    ctx.fillStyle = "#101317"; ctx.fillRect(0, 0, W, H);
+    if (!sol || !field) return;
+    const { Nx, Ny } = sol;
+    // fit the domain's aspect ratio inside the canvas
+    const pad = 10, s = Math.min((W - 2 * pad) / Lx, (H - 2 * pad) / Ly);
+    const iw = Lx * s, ih = Ly * s, ix = (W - iw) / 2, iy = (H - ih) / 2;
+    geo.current = { ix, iy, iw, ih };
+
+    const o = off.current || (off.current = document.createElement("canvas"));
+    if (o.width !== Nx || o.height !== Ny) { o.width = Nx; o.height = Ny; }
+    const octx = o.getContext("2d");
+    const img = octx.createImageData(Nx, Ny), d = img.data;
+    const inv = 1 / Math.max(hi - lo, 1e-12);
     for (let j = 0; j < Ny; j++) {
-      const srcRow = j * Nx;
-      const dstRow = (Ny - 1 - j) * Nx;
+      const src = j * Nx, dst = (Ny - 1 - j) * Nx;       // flip: +y points up
       for (let i = 0; i < Nx; i++) {
-        const norm = (field[srcRow + i] - minV) / range;
-        colormap(norm, data, (dstRow + i) * 4);
+        const k = 3 * Math.max(0, Math.min(255, Math.round((field[src + i] - lo) * inv * 255)));
+        const q = 4 * (dst + i);
+        d[q] = CMAP[k]; d[q + 1] = CMAP[k + 1]; d[q + 2] = CMAP[k + 2]; d[q + 3] = 255;
       }
     }
-    ctx.putImageData(img, 0, 0);
+    octx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = smooth;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(o, ix, iy, iw, ih);
 
-    // Stretch via CSS to the canvas display size; let imageSmoothing off look pixelated.
-    cv.style.imageRendering = "pixelated";
-
-    // Tiny min/max readout overlay (in the caption div, not on the canvas).
-    cv.dataset.label = label;
-    cv.dataset.min = minV.toExponential(2);
-    cv.dataset.max = maxV.toExponential(2);
-  }, [result, mode]);
-
-  return (
-    <div style={{ position: "relative", background: "#1c1a17", padding: 6 }}>
-      <canvas ref={canvasRef}
-        style={{ display: "block", width: "100%", height: "auto",
-                 aspectRatio: result ? (result.Nx + "/" + result.Ny) : "1/1",
-                 background: "#1c1a17", opacity: busy ? 0.55 : 1, transition: "opacity 120ms" }} />
-    </div>
-  );
-}
-
-// ---------- SVG line plot (1D slice through the 2D field) ----------
-function LinePlot({ x, y, label, color }) {
-  const W = 360, H = 200;
-  const pad = { l: 48, r: 12, t: 24, b: 28 };
-  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
-  let yMin = Infinity, yMax = -Infinity;
-  for (let i = 0; i < y.length; i++) {
-    if (Number.isFinite(y[i])) {
-      if (y[i] < yMin) yMin = y[i];
-      if (y[i] > yMax) yMax = y[i];
+    const X = x => ix + (x / Lx) * iw, Y = y => iy + (1 - y / Ly) * ih;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 4]); ctx.strokeStyle = "rgba(16,19,23,0.75)";
+    ctx.beginPath();
+    ctx.moveTo(ix, Math.round(Y(cut.y)) + 0.5); ctx.lineTo(ix + iw, Math.round(Y(cut.y)) + 0.5);
+    ctx.moveTo(Math.round(X(cut.x)) + 0.5, iy); ctx.lineTo(Math.round(X(cut.x)) + 0.5, iy + ih);
+    ctx.stroke(); ctx.setLineDash([]);
+    if (hover) {
+      ctx.strokeStyle = "#d7a33c";
+      ctx.beginPath(); ctx.arc(X(hover.x), Y(hover.y), 5, 0, Math.PI * 2); ctx.stroke();
     }
-  }
-  if (!Number.isFinite(yMin)) { yMin = 0; yMax = 1; }
-  const yPad = Math.max((yMax - yMin) * 0.08, 1e-6);
-  const yLo = yMin - yPad, yHi = yMax + yPad;
-  const xMin = x[0], xMax = x[x.length - 1];
-  const toX = v => pad.l + ((v - xMin) / (xMax - xMin)) * pw;
-  const toY = v => pad.t + (1 - (v - yLo) / (yHi - yLo)) * ph;
-  let path = "";
-  for (let i = 0; i < x.length; i++) {
-    path += (i === 0 ? "M" : "L") + toX(x[i]).toFixed(2) + " " + toY(y[i]).toFixed(2);
-  }
-  const fmt = v => {
-    const a = Math.abs(v);
-    if (a === 0) return "0";
-    if (a < 0.01 || a >= 1000) return v.toExponential(1);
-    return v.toFixed(a < 1 ? 3 : 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.strokeRect(ix + 0.5, iy + 0.5, iw - 1, ih - 1);
+  }, [sol, field, lo, hi, Lx, Ly, smooth, cut, hover]);
+
+  const toDomain = e => {
+    const g = geo.current; if (!g) return null;
+    const r = e.currentTarget.getBoundingClientRect();
+    const fx = (e.clientX - r.left - g.ix) / g.iw, fy = (e.clientY - r.top - g.iy) / g.ih;
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+    return { x: fx * Lx, y: (1 - fy) * Ly };
   };
-  return (
-    <svg viewBox={"0 0 " + W + " " + H} style={{ display: "block", width: "100%" }}>
-      <rect x={pad.l} y={pad.t} width={pw} height={ph} fill="#f7f2e3" stroke="#1c1a17" strokeWidth="0.6" />
-      {[0.25, 0.5, 0.75].map((f, i) => (
-        <line key={"v" + i} x1={pad.l + f * pw} x2={pad.l + f * pw} y1={pad.t} y2={pad.t + ph}
-              stroke="#c8c0aa" strokeWidth="0.4" strokeDasharray="2 3" />
-      ))}
-      {[0.25, 0.5, 0.75].map((f, i) => (
-        <line key={"h" + i} x1={pad.l} x2={pad.l + pw} y1={pad.t + f * ph} y2={pad.t + f * ph}
-              stroke="#c8c0aa" strokeWidth="0.4" strokeDasharray="2 3" />
-      ))}
-      <path d={path} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" />
-      <text x={pad.l} y={pad.t - 8} fontFamily="ui-serif, 'Iowan Old Style', Palatino, Georgia, serif" fontSize="13" fontStyle="italic" fill="#1c1a17">{label}</text>
-      <text x={pad.l - 6} y={toY(yHi) + 4} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yHi)}</text>
-      <text x={pad.l - 6} y={toY(yLo) + 4} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yLo)}</text>
-      <text x={toX(xMin)} y={pad.t + ph + 14} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="start">{xMin.toFixed(2)}</text>
-      <text x={toX(xMax)} y={pad.t + ph + 14} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{xMax.toFixed(2)}</text>
-    </svg>
-  );
+  return <canvas ref={ref} className="stage-canvas" style={{ height: "min(68vh, 720px)" }}
+                 onMouseMove={e => onHover(toDomain(e))} onMouseLeave={() => onHover(null)}
+                 onClick={e => { const p = toDomain(e); if (p) onCut(p); }} />;
 }
 
-// ---------- Numeric input ----------
-function NumField({ label, value, onChange, step }) {
-  return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 3, fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", fontSize: 11, color: "var(--ink)" }}>
-      <span style={{ letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontSize: 9 }}>{label}</span>
-      <input type="number" value={value} step={step || 0.1}
-        onChange={e => onChange(parseFloat(e.target.value))}
-        style={{ fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", fontSize: 13, padding: "5px 7px",
-          background: "var(--field)", border: "1px solid var(--faint)", color: "var(--ink)",
-          borderRadius: 0, outline: "none", width: "100%" }} />
-    </label>
-  );
-}
-
-// ---------- Main app ----------
+// ============================================================
+// 2D workspace
+// ============================================================
 function App() {
-  // Default preset = Sod-radial
-  const presetName0 = "Sod-radial";
-  const p0 = PRESETS2D[presetName0];
-
-  const [presetName, setPresetName] = useState(presetName0);
-  const [Nx, setNx]           = useState(p0.N);
-  const [Ny, setNy]           = useState(p0.N);
-  const [Lx, setLx]           = useState(p0.Lx);
-  const [Ly, setLy]           = useState(p0.Ly);
-  const [gamma, setGamma]     = useState(p0.gamma);
-  const [cfl, setCfl]         = useState(p0.cfl);
-  const [tEnd, setTEnd]       = useState(p0.tEnd);
+  const P0 = PRESETS2D["Sod-radial"];
+  const [preset, setPreset]   = useState("Sod-radial");
+  const [Nx, setNx]           = useState(P0.N);
+  const [Ny, setNy]           = useState(P0.N);
+  const [gamma, setGamma]     = useState(P0.gamma);
+  const [cfl, setCfl]         = useState(P0.cfl);
+  const [tEnd, setTEnd]       = useState(P0.tEnd);
   const [flux, setFlux]       = useState("HLLC");
   const [viewMode, setViewMode] = useState("density");
+  const [smooth, setSmooth]   = useState(true);
   const [showSlices, setShowSlices] = useState(true);
+  const [hover, setHover]     = useState(null);
+  const [cutF, setCutF]       = useState({ x: 0.5, y: 0.5 });   // cut position as a fraction of the domain
+  const [help, setHelp]       = useState(false);
+  const [err, setErr]         = useState(null);
 
-  const [result, setResult] = useState(null);
-  const [info, setInfo]     = useState({ t: 0, step: 0, ms: 0 });
-  const [busy, setBusy]     = useState(false);
-  const [err, setErr]       = useState(null);
-  const [animating, setAnimating] = useState(false);
-  const stateRef = useRef(null);
-  const rafRef   = useRef(null);
+  const [player, startPlayer] = usePlayer();
+  const solved = useRef({ key: null, params: null, run: 0 });
 
-  const params = useMemo(() => ({
-    Nx, Ny, Lx, Ly, gamma, cfl, flux,
-    initFn: PRESETS2D[presetName].init
-  }), [Nx, Ny, Lx, Ly, gamma, cfl, flux, presetName]);
+  const { Lx, Ly } = PRESETS2D[preset];
+  const params = useMemo(() => ({ preset, Nx, Ny, Lx, Ly, gamma, cfl, tEnd, flux }),
+                         [preset, Nx, Ny, Lx, Ly, gamma, cfl, tEnd, flux]);
+  const stale = !!player && solved.current.key !== JSON.stringify(params);
 
-  const validate = () => {
-    if (gamma <= 1)                       return "gamma must be > 1.";
-    if (cfl <= 0 || cfl > 0.9)            return "CFL must be in (0, 0.9].";
-    if (Nx < 20 || Nx > 400)              return "Nx must be in [20, 400].";
-    if (Ny < 20 || Ny > 400)              return "Ny must be in [20, 400].";
-    if (tEnd <= 0)                        return "t_end must be positive.";
+  const validate = P => {
+    if (!(P.gamma > 1))                  return "γ must be greater than 1.";
+    if (!(P.cfl > 0 && P.cfl <= 0.9))    return "CFL must be in (0, 0.9].";
+    if (!(P.Nx >= 20 && P.Nx <= 400))    return "Nx must be in [20, 400].";
+    if (!(P.Ny >= 20 && P.Ny <= 400))    return "Ny must be in [20, 400].";
+    if (!(P.tEnd > 0))                   return "t_end must be positive.";
     return null;
   };
 
-  const stopAnim = () => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
-    setAnimating(false);
+  const run = (mode, P) => {
+    P = P || params;
+    const e = validate(P); setErr(e); if (e) return;
+    solved.current = { key: JSON.stringify(P), params: P, run: solved.current.run + 1 };
+    const init = PRESETS2D[P.preset].init;
+    startPlayer({
+      tEnd: P.tEnd, maxFrames: framesFor(P.Nx, P.Ny), playSeconds: 8,
+      init: () => initState2D({ Nx: P.Nx, Ny: P.Ny, Lx: P.Lx, Ly: P.Ly, gamma: P.gamma,
+                                cfl: P.cfl, flux: P.flux, initFn: init }),
+      advance: (s, t) => stepUntil2D(s, t),
+      stableDt: stableDt2D,
+      record: record2D,
+      check: check2D
+    }, mode);
   };
-
-  const runFinal = useCallback(() => {
-    stopAnim();
-    const e = validate(); if (e) { setErr(e); return; }
-    setErr(null); setBusy(true);
-    // Yield to let "computing..." render before the synchronous solve.
-    setTimeout(() => {
-      const t0 = performance.now();
-      let s = initState2D(params);
-      s = stepUntil2D(s, tEnd);
-      const ms = performance.now() - t0;
-      setResult(extract2D(s));
-      setInfo({ t: s.t, step: s.step, ms });
-      setBusy(false);
-    }, 10);
-  }, [params, tEnd]);
-
-  const animate = () => {
-    stopAnim();
-    const e = validate(); if (e) { setErr(e); return; }
-    setErr(null);
-    const wallStart = performance.now();
-    let s = initState2D(params);
-    stateRef.current = s;
-    setResult(extract2D(s));
-    setInfo({ t: 0, step: 0, ms: 0 });
-    setAnimating(true);
-    // Time-march in chunks of CFL-limited steps so each rAF tick stays responsive.
-    // We aim for ~20 frames per simulation regardless of step count.
-    const FRAMES = 40;
-    let frame = 0;
-    const tick = () => {
-      frame++;
-      const target = Math.min(tEnd, (frame / FRAMES) * tEnd);
-      stateRef.current = stepUntil2D(stateRef.current, target);
-      setResult(extract2D(stateRef.current));
-      setInfo({ t: stateRef.current.t, step: stateRef.current.step,
-                ms: performance.now() - wallStart });
-      if (stateRef.current.t < tEnd) {
-        rafRef.current = requestAnimationFrame(tick);
-      } else {
-        rafRef.current = null;
-        setAnimating(false);
-      }
-    };
-    rafRef.current = requestAnimationFrame(tick);
-  };
-
-  // Initial render on mount
-  useEffect(() => { runFinal(); /* eslint-disable-next-line */ }, []);
 
   const loadPreset = name => {
-    stopAnim();
-    const p = PRESETS2D[name];
-    setPresetName(name);
-    setNx(p.N); setNy(p.N);
-    setLx(p.Lx); setLy(p.Ly);
-    setGamma(p.gamma); setCfl(p.cfl); setTEnd(p.tEnd);
+    const q = PRESETS2D[name];
+    setPreset(name); setNx(q.N); setNy(q.N); setGamma(q.gamma); setCfl(q.cfl); setTEnd(q.tEnd);
+    run("solve", { preset: name, Nx: q.N, Ny: q.N, Lx: q.Lx, Ly: q.Ly, gamma: q.gamma, cfl: q.cfl, tEnd: q.tEnd, flux });
   };
 
-  // Slice plots: x-slice through the y-midline, y-slice through the x-midline.
-  const slices = useMemo(() => {
-    if (!result || !showSlices) return null;
-    const jMid = Math.floor(result.Ny / 2);
-    const iMid = Math.floor(result.Nx / 2);
-    return {
-      xs: result.xs, ys: result.ys,
-      rhoX: slice2D(result.rho, result.Nx, result.Ny, "x", jMid),
-      pX:   slice2D(result.p,   result.Nx, result.Ny, "x", jMid),
-      rhoY: slice2D(result.rho, result.Nx, result.Ny, "y", iMid),
-      pY:   slice2D(result.p,   result.Nx, result.Ny, "y", iMid),
-      jMid, iMid
-    };
-  }, [result, showSlices]);
+  useEffect(() => { run("solve"); /* eslint-disable-next-line */ }, []);
+  useEffect(() => {
+    const onKey = e => { if (e.key === "Escape") setHelp(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useShortcuts({
+    "Enter": () => run("solve"),
+    " ": () => (player && !stale ? player.toggle() : run("play")),
+    "ArrowLeft": () => player && player.stepFrame(-1),
+    "ArrowRight": () => player && player.stepFrame(1),
+    "Home": () => player && player.seek(0),
+    "End": () => player && player.seek(player.tEnd),
+    "?": () => setHelp(h => !h)
+  });
 
-  const C = { rho: "#8b3a2f", p: "#4a5d23" };
-  const fieldLabel = viewMode === "schlieren" ? "|∇ρ| (schlieren)" :
-                     viewMode === "pressure"  ? "pressure" :
-                     viewMode === "Mach"      ? "Mach"     : "density";
+  const SP = solved.current.params;
+  const frame = player ? player.current() : null;
+  const sol = useMemo(() => {
+    if (!frame || !SP) return null;
+    return extract2D(Object.assign({ Nx: SP.Nx, Ny: SP.Ny, dx: SP.Lx / SP.Nx, dy: SP.Ly / SP.Ny, gamma: SP.gamma },
+                                   frame.snap));
+  }, [frame, SP]);
+
+  const field = useMemo(() => !sol ? null
+    : viewMode === "pressure" ? sol.p
+    : viewMode === "Mach" ? sol.M
+    : viewMode === "schlieren" ? schlieren2D(sol)
+    : sol.rho, [sol, viewMode]);
+  const [flo, fhi] = finiteRange([field]);
+  const [lo, hi] = useSmoothRange(flo, fhi, solved.current.run + viewMode);
+
+  const SLx = SP ? SP.Lx : Lx, SLy = SP ? SP.Ly : Ly;
+  const cut = { x: cutF.x * SLx, y: cutF.y * SLy };
+  const slices = useMemo(() => {
+    if (!sol || !showSlices) return null;
+    const j = Math.max(0, Math.min(sol.Ny - 1, Math.floor(cutF.y * sol.Ny)));
+    const i = Math.max(0, Math.min(sol.Nx - 1, Math.floor(cutF.x * sol.Nx)));
+    return {
+      xs: sol.xs, ys: sol.ys, yAt: sol.ys[j], xAt: sol.xs[i],
+      rhoX: slice2D(sol.rho, sol.Nx, sol.Ny, "x", j), pX: slice2D(sol.p, sol.Nx, sol.Ny, "x", j),
+      rhoY: slice2D(sol.rho, sol.Nx, sol.Ny, "y", i), pY: slice2D(sol.p, sol.Nx, sol.Ny, "y", i)
+    };
+  }, [sol, showSlices, cutF]);
+
+  let probe = null, where = "";
+  if (sol && hover) {
+    const i = Math.max(0, Math.min(sol.Nx - 1, Math.floor(hover.x / SLx * sol.Nx)));
+    const j = Math.max(0, Math.min(sol.Ny - 1, Math.floor(hover.y / SLy * sol.Ny)));
+    const k = j * sol.Nx + i;
+    where = "(" + fmt(sol.xs[i], 3) + ", " + fmt(sol.ys[j], 3) + ")";
+    probe = [["ρ", sol.rho[k]], ["u", sol.u[k]], ["v", sol.v[k]], ["p", sol.p[k]], ["M", sol.M[k]]];
+  }
+
+  const resetKey = solved.current.run;
+  // Line-outs share the hover probe: along-x plots drive hover.x on the y-cut, and vice versa.
+  const hoverAlongX = v => setHover(v == null ? null : { x: v, y: cut.y });
+  const hoverAlongY = v => setHover(v == null ? null : { x: cut.x, y: v });
+  const modeLabel = { density: "density ρ", schlieren: "schlieren |∇ρ|", pressure: "pressure p", Mach: "Mach |u|/a" }[viewMode];
 
   return (
-    <div className="grain" style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--ink)",
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 0,
-                     borderBottom: "1.5px solid var(--line)", background: "var(--surface)",
-                     padding: "0 22px", position: "sticky", top: 0, zIndex: 10 }}>
-        <span className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic",
-                     fontSize: 13, color: "var(--ink)", padding: "10px 14px 10px 0" }}>
-          Euler Lab
-        </span>
-        <a href="index.html" className="tablink" style={{ fontSize: 11, letterSpacing: "0.08em",
-                     textTransform: "uppercase", padding: "10px 18px 10px 0", borderBottom: "none" }}>
-          ← 1D Shock Tube + Nozzle
-        </a>
-        <span style={{ fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase",
-                     padding: "10px 0", marginLeft: "auto", color: "var(--accent)", fontWeight: 700,
-                     borderBottom: "2.5px solid var(--accent)" }}>
-          2D Cartesian
-        </span>
-      </div>
-      <details style={{ padding: "8px 22px 0", fontSize: 11, color: "var(--muted)" }}>
-        <summary style={{ cursor: "pointer", letterSpacing: "0.06em", textTransform: "uppercase", fontSize: 10 }}>
-          what am I looking at?
-        </summary>
-        <p style={{ margin: "6px 0 0", maxWidth: 760, lineHeight: 1.5 }}>
-          Full 2D compressible Euler on a Cartesian grid. Pick a <i>preset</i> initial condition
-          (radial Sod, a four-quadrant 2D Riemann problem, the Sedov point blast, or a Kelvin–Helmholtz
-          shear layer), choose a Riemann <i>flux</i>, then <i>run</i> or <i>animate</i>. The heatmap shows
-          the chosen field over the whole grid; the line-outs cut through the x- and y-midlines so you can
-          read wave structure quantitatively. The <b>← 1D</b> link switches to the shock-tube + nozzle lab.
-        </p>
-      </details>
-      <div style={{ padding: "16px 22px 36px" }}>
-      <header style={{ borderBottom: "1.5px solid var(--line)", paddingBottom: 10, marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-          <h1 style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
-            2D Euler <span style={{ fontStyle: "normal", fontWeight: 400 }}>{"· cartesian laboratory"}</span>
-          </h1>
-          <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)" }}>{flux + " · MUSCL · SSP-RK2"}</span>
-        </div>
-        <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--muted)", maxWidth: 760 }}>
-          Pick a 2D initial condition, choose a Riemann flux, and time-march. The heatmap renders the
-          chosen field across the whole grid; the line-out plots cut through the x- and y-midlines so
-          you can read the wave structure quantitatively.
-        </p>
-      </header>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, alignItems: "center" }}>
-        <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)", marginRight: 4 }}>{"presets ›"}</span>
-        {Object.keys(PRESETS2D).map(name => (
-          <button key={name} className="btn" onClick={() => loadPreset(name)}
-                  style={presetName === name ? { background: "var(--accent)", color: "var(--accent-ink)" } : {}}>{name}</button>
-        ))}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 16 }}>
-        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
-            grid
-          </legend>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 8 }}>
-            <NumField label="Nx" value={Nx}  onChange={v => setNx(Math.round(v))} step={20} />
-            <NumField label="Ny" value={Ny}  onChange={v => setNy(Math.round(v))} step={20} />
-            <NumField label="Lx" value={Lx}  onChange={setLx} step={0.1} />
-            <NumField label="Ly" value={Ly}  onChange={setLy} step={0.1} />
-          </div>
-        </fieldset>
-
-        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
-            numerics
-          </legend>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-            <NumField label="gamma" value={gamma} onChange={setGamma} step={0.05} />
-            <NumField label="CFL"   value={cfl}   onChange={setCfl}   step={0.05} />
-            <NumField label="t end" value={tEnd}  onChange={setTEnd}  step={0.05} />
-          </div>
-        </fieldset>
-      </div>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 14, padding: "10px 12px",
-                     background: "var(--elevated)", color: "var(--ink)", borderRadius: 10 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          <span>flux</span>
-          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
-            <option value="HLLC">HLLC</option>
-            <option value="HLL">HLL</option>
-            <option value="Roe">Roe</option>
-            <option value="Rusanov">Rusanov</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          <span>view</span>
-          <select value={viewMode} onChange={e => setViewMode(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
-            <option value="density">density</option>
-            <option value="schlieren">schlieren</option>
-            <option value="pressure">pressure</option>
-            <option value="Mach">Mach</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
-          <input type="checkbox" checked={showSlices} onChange={e => setShowSlices(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
-          <span>centerline slices</span>
-        </label>
-        <button className="btn btn-primary" onClick={runFinal} disabled={busy || animating}>
-          {busy ? "computing..." : "run to t_end"}
-        </button>
-        <button className="btn" onClick={animate} disabled={busy || animating}
-                style={{ background: animating ? "var(--accent-2)" : "var(--field)", color: animating ? "var(--accent-ink)" : "var(--ink)" }}>
-          {animating ? "animating..." : "animate"}
-        </button>
-        {animating && <button className="btn" onClick={stopAnim} style={{ background: "var(--field)", color: "var(--ink)" }}>stop</button>}
-
-        <div style={{ marginLeft: "auto", fontSize: 11, display: "flex", gap: 18, color: "var(--ink)" }}>
-          <span><span style={{ color: "var(--muted)" }}>t = </span>{info.t.toFixed(4)}</span>
-          <span><span style={{ color: "var(--muted)" }}>steps = </span>{info.step}</span>
-          <span><span style={{ color: "var(--muted)" }}>wall = </span>{info.ms.toFixed(0)} ms</span>
-        </div>
-      </div>
-
-      {err && (
-        <div style={{ padding: "8px 12px", border: "1px solid var(--danger)", background: "var(--danger-bg)", color: "var(--accent)",
-                        fontSize: 11, marginBottom: 12 }}>
-          ! {err}
-        </div>
-      )}
-
-      <div style={{ display: "grid", gridTemplateColumns: showSlices ? "1.6fr 1fr" : "1fr", gap: 14 }}>
-        <div>
-          <div className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, color: "var(--ink)", marginBottom: 4 }}>
-            {fieldLabel} field {"· " + Nx + " × " + Ny}
-          </div>
-          {result && <Heatmap result={result} mode={viewMode} busy={busy} />}
-        </div>
-
-        {showSlices && slices && (
-          <div style={{ display: "grid", gridTemplateRows: "1fr 1fr 1fr 1fr", gap: 10, background: "var(--elevated)", padding: 10, borderRadius: 12 }}>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 3px", borderRadius: 8 }}>
-              <LinePlot x={slices.xs} y={slices.rhoX}
-                        label={"density along y = " + (slices.ys[slices.jMid] || 0).toFixed(3)}
-                        color={C.rho} />
+    <div className="app">
+      <TopBar active="2d" scheme={flux + " · MUSCL–minmod · SSP-RK2 · dimension-by-dimension"} onHelp={() => setHelp(h => !h)} />
+      <div className="workspace">
+        <aside className="rail">
+          <p className="rail-intro">
+            Full 2D compressible Euler on a Cartesian grid. Click the field to move the line-out cuts.
+          </p>
+          <Section title="Preset">
+            <div className="presets">
+              {Object.keys(PRESETS2D).map(name => (
+                <button key={name} className={"preset" + (preset === name ? " on" : "")}
+                        onClick={() => loadPreset(name)}>{name}</button>
+              ))}
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 3px", borderRadius: 8 }}>
-              <LinePlot x={slices.xs} y={slices.pX}
-                        label={"pressure along y = " + (slices.ys[slices.jMid] || 0).toFixed(3)}
-                        color={C.p} />
+            <div className="note">Domain {Lx} × {Ly} · transmissive boundaries on all four sides.</div>
+          </Section>
+          <Section title="Numerics">
+            <SelectField label="Riemann flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />
+            <div className="grid-3">
+              <NumField label="Nx" value={Nx} onChange={v => setNx(Math.round(v))} step={20} />
+              <NumField label="Ny" value={Ny} onChange={v => setNy(Math.round(v))} step={20} />
+              <NumField label="CFL" value={cfl} onChange={setCfl} step={0.05} />
+              <NumField label="t end" value={tEnd} onChange={setTEnd} step={0.05} />
+              <NumField label="γ" value={gamma} onChange={setGamma} step={0.05} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 3px", borderRadius: 8 }}>
-              <LinePlot x={slices.ys} y={slices.rhoY}
-                        label={"density along x = " + (slices.xs[slices.iMid] || 0).toFixed(3)}
-                        color={C.rho} />
+            {cfl > CFL_SAFE && <div className="note" style={{ color: "var(--accent-2)" }}>
+              CFL above {CFL_SAFE} is past the usual MUSCL + RK2 margin.</div>}
+            <div className="note">{framesFor(Nx, Ny)} recorded frames at this grid size.</div>
+          </Section>
+          <Section title="Display">
+            <Segmented label="Field" value={viewMode} onChange={setViewMode}
+                       options={[{ value: "density", label: "ρ" }, { value: "schlieren", label: "schlieren" },
+                                 { value: "pressure", label: "p" }, { value: "Mach", label: "M" }]} />
+            <Toggle checked={smooth} onChange={setSmooth} label="smooth interpolation" />
+            <Toggle checked={showSlices} onChange={setShowSlices} label="line-outs along the cuts" />
+            <button className="btn" onClick={() => setCutF({ x: 0.5, y: 0.5 })}>Reset cuts to centre</button>
+          </Section>
+        </aside>
+
+        <main className="main">
+          <Transport player={player} stale={stale}
+                     onSolve={() => run("solve")} onPlay={() => run("play")}
+                     info={frame ? frame.step + " steps · " + Math.round(player.computeMs) + " ms" : null} />
+          {stale && <div className="note">Parameters changed — press <b>Solve</b> (Enter) to recompute.</div>}
+          {err && <div className="alert">{err}</div>}
+          {player && player.error && <div className="alert">{player.error} Try HLLC / HLL / Rusanov or a lower CFL.</div>}
+
+          <section className="stage">
+            <div className="stage-head">
+              <span className="stage-title">{preset}</span>
+              <span className="muted">{modeLabel} · {SP ? SP.Nx + " × " + SP.Ny : ""}</span>
+              <span className="muted" style={{ marginLeft: "auto" }}>
+                cuts at x = {fmt(cut.x, 3)}, y = {fmt(cut.y, 3)}</span>
             </div>
-            <div style={{ background: "#efe9d8", padding: "6px 8px 3px", borderRadius: 8 }}>
-              <LinePlot x={slices.ys} y={slices.pY}
-                        label={"pressure along x = " + (slices.xs[slices.iMid] || 0).toFixed(3)}
-                        color={C.p} />
+            <div className="stage-body">
+              <Heatmap sol={sol} field={field} lo={lo} hi={hi} Lx={SLx} Ly={SLy} smooth={smooth}
+                       cut={cut} hover={hover} onHover={setHover}
+                       onCut={p => setCutF({ x: p.x / SLx, y: p.y / SLy })} />
             </div>
-          </div>
-        )}
+            <div className="stage-foot">
+              <Colorbar lo={lo} hi={hi} label={modeLabel} />
+              <Probe items={probe} where={where} />
+            </div>
+          </section>
+
+          {slices && (
+            <div className="plots">
+              <PlotCard title={"density ρ along x (y = " + fmt(slices.yAt, 3) + ")"} x={slices.xs} y={slices.rhoX}
+                        hoverX={hover ? hover.x : null} onHover={hoverAlongX} resetKey={resetKey + "rx" + cutF.y} />
+              <PlotCard title={"pressure p along x (y = " + fmt(slices.yAt, 3) + ")"} x={slices.xs} y={slices.pX}
+                        hoverX={hover ? hover.x : null} onHover={hoverAlongX} resetKey={resetKey + "px" + cutF.y} />
+              <PlotCard title={"density ρ along y (x = " + fmt(slices.xAt, 3) + ")"} x={slices.ys} y={slices.rhoY}
+                        hoverX={hover ? hover.y : null} onHover={hoverAlongY} resetKey={resetKey + "ry" + cutF.x} />
+              <PlotCard title={"pressure p along y (x = " + fmt(slices.xAt, 3) + ")"} x={slices.ys} y={slices.pY}
+                        hoverX={hover ? hover.y : null} onHover={hoverAlongY} resetKey={resetKey + "py" + cutF.x} />
+            </div>
+          )}
+          <footer className="note">∂U/∂t + ∂F/∂x + ∂G/∂y = 0 · U = [ρ, ρu, ρv, E] · finite volume, 2D Cartesian, ideal gas</footer>
+        </main>
       </div>
 
-      <footer style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid var(--line)", fontSize: 10, color: "var(--muted)",
-                        display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-        <span>dU/dt + dF/dx + dG/dy = 0  {"·"}  U = [rho, rho*u, rho*v, E]  {"·"}  ideal gas</span>
-        <span className="smallcaps">finite volume {"·"} 2D cartesian {"·"} transmissive BCs</span>
-      </footer>
-      </div>
+      <HelpDrawer open={help} onClose={() => setHelp(false)}>
+        <h2>2D field</h2>
+        <p>Full 2D compressible Euler on a Cartesian grid, solved dimension by dimension with the same Riemann
+          solvers as the 1D lab.</p>
+        <p>Presets: a radial Sod problem (should stay circular — any anisotropy is numerical), the Lax–Liu
+          four-quadrant Riemann problem (configuration 3), the Sedov point blast (a positivity stress test), and a
+          Kelvin–Helmholtz shear layer (sensitive to numerical dissipation — compare fluxes).</p>
+        <h3>Workflow</h3>
+        <p>Pick a preset (it solves immediately) or edit and press <b>Solve</b>. Computation runs in small slices
+          between animation frames, so the page stays responsive; afterwards <b>Play</b> replays the run and the
+          timeline scrubs it. Click the field to place the two cuts; the line-outs follow. Hover to probe.</p>
+      </HelpDrawer>
     </div>
   );
 }
 
-// Idempotent mount: reuse a single root so a re-run can never double-mount.
 if (!window.__eulerRoot) {
   window.__eulerRoot = ReactDOM.createRoot(document.getElementById("root"));
 }
 window.__eulerRoot.render(<App />);
 </script>
 
-<!-- Resilience net (additive, cosmetic-neutral): if @babel/standalone finishes
-     loading AFTER DOMContentLoaded, its automatic transform of the text/babel
-     script never fires and the page stays on "Loading...". Kick it manually.
-     No-op on the normal path (guarded on the "Loading" placeholder). -->
+<!-- Resilience net: if @babel/standalone finishes loading AFTER DOMContentLoaded,
+     its automatic transform of the text/babel script never fires and the page
+     stays on "Loading...". -->
 <script>
-(function ensureBabelRuns(tries){
-  var root = document.getElementById('root');
-  if (!root) return;
-  if (/Loading\.\.\./.test(root.textContent) && window.Babel && window.React && window.ReactDOM) {
-    try { window.Babel.transformScriptTags(); } catch (e) {}
-  }
-  root = document.getElementById('root');
-  if (root && /Loading\.\.\./.test(root.textContent) && tries < 60) {
-    setTimeout(function(){ ensureBabelRuns(tries + 1); }, 120);
-  }
-})(0);
+// Runs only after the page has loaded and only if the app script never
+// started (window.__eulerBooted), so it can't execute the app twice.
+window.addEventListener('load', function () {
+  (function ensureBabelRuns(tries){
+    if (window.__eulerBooted) return;
+    if (window.Babel && window.React && window.ReactDOM) {
+      try { window.Babel.transformScriptTags(); } catch (e) {}
+    }
+    if (!window.__eulerBooted && tries < 60) {
+      setTimeout(function(){ ensureBabelRuns(tries + 1); }, 120);
+    }
+  })(0);
+});
 </script>
 </body>
 </html>

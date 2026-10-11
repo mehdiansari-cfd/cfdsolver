@@ -10,7 +10,7 @@ The numerical framework follows the structure laid out in *Write Your First CFD 
 
 **Do not add a build step, bundler, package manager install, transpile step, or framework migration.** This is the single most important constraint.
 
-- The pages (`index.html`, `index2d.html`) load React, ReactDOM, and Babel-standalone from a CDN, then the solver `.js` files, then render. Open the HTML in a browser and it runs. There is no `npm install`, no `node_modules` in the runtime path, no CMake, no webpack/vite.
+- The pages (`index.html`, `index2d.html`) load React, ReactDOM, and Babel-standalone from a CDN (exact versions pinned), then `labui.js` and the solver `.js` files, then render. Open the HTML in a browser and it runs. There is no `npm install`, no `node_modules` in the runtime path, no CMake, no webpack/vite.
 - The solver math (`solver.js`, `nozzle.js`, `solver2d.js`) is plain, ES5-compatible JavaScript with **no imports and no third-party libraries**. Each file exposes browser globals *and* a CommonJS `module.exports` so it can be `require`d from Node for headless runs and tests.
 - The test suite (`test.js`) and CI use **only Node's built-in modules** (`assert`). No test framework, no dev-dependencies.
 - If a dependency ever seems genuinely warranted, **flag it and make the case first** — the default answer is "keep it vanilla." See `CONTRIBUTING.md`.
@@ -71,8 +71,11 @@ If a feature doesn't fit cleanly into one of these slots, that's a signal to re-
 ### Actual file layout
 ```
 cfdsolver/
-├── index.html      1D UI: shock tube + nozzle (React via Babel-standalone, canvas + SVG)
-├── index2d.html    2D UI: heatmap + centerline line-outs
+├── index.html      1D UI: shock tube + nozzle workspaces (React via Babel-standalone, canvas)
+├── index2d.html    2D UI: heatmap + line-outs along movable cuts
+├── labui.js        Shared UI layer: Player (time-budgeted compute + playback), canvas
+│                   plots, controls. Plain JS + React.createElement, no math, no JSX
+├── lab.css         Shared workspace stylesheet (colour tokens on :root)
 ├── solver.js       1D shock-tube math: fluxes, MUSCL, SSP-RK2, exact Riemann
 ├── nozzle.js       Quasi-1D nozzle math: area source, reservoir + back-pressure BCs,
 │                   isentropic A/A* overlay. Reuses solver.js's flux machinery.
@@ -81,7 +84,7 @@ cfdsolver/
 └── docs/           Screenshot/GIF capture guide + suggested repo metadata
 ```
 
-**Separation of concerns (do not break this):** the `.js` math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). `nozzle.js` reuses `solver.js` globals (`primToCons`, `FLUXES`, `computeRhs`, `extract`), so in the browser `solver.js` must load **before** `nozzle.js`. `solver2d.js` is self-contained.
+**Separation of concerns (do not break this):** the `.js` math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). `nozzle.js` reuses `solver.js` globals (`primToCons`, `FLUXES`, `computeRhs`, `stableDt`, `extract`), so in the browser `solver.js` must load **before** `nozzle.js`. `solver2d.js` is self-contained. `labui.js` is UI-only: the pages hand its `Player` plain callbacks (`init`, `advance` = `stepUntil*`, `stableDt`, `record`, `check`), so it never touches the equations. Shared UI code lives there as plain JS (not JSX) because Babel-standalone can't fetch external JSX over `file://`.
 
 Keep the time-stepping loop visible and linear, top-to-bottom like prose. Helper functions are fine; deep class hierarchies are not. This is the book's deliberately flat style, kept for the same pedagogical reason.
 
@@ -141,12 +144,12 @@ Composite conditions in this codebase:
 |---------------------|-------|-------------|-----------------|---------|
 | Transmissive (open) | 1D shock tube, all 2D walls | Neumann | Neumann | Neumann |
 | Reflective / inviscid wall | 1D shock tube option | Dirichlet (0) | Neumann | Neumann |
-| Reservoir inlet     | nozzle | from Riemann invariant | — | isentropic from `(p₀, T₀)` |
+| Reservoir inlet     | nozzle | extrapolated from interior | — | isentropic from `(p₀, T₀)` |
 | Back-pressure / supersonic outlet | nozzle | Neumann | — | `p_b` (subsonic) or full extrapolation (supersonic) |
 
 Reflective walls: copy the conserved state from the interior cell and **negate the normal momentum component**; tangential momentum is copied as-is. With ghost cells, mirror across the boundary index. For 2D, south/north treat y-momentum as normal, east/west treat x-momentum as normal.
 
-The nozzle inlet closes the subsonic boundary by fixing the incoming Riemann invariant from the reservoir and extrapolating the outgoing one from the first interior cell; the exit switches between imposed back pressure and full extrapolation based on the local exit Mach. See `nozzle.js` (`applyNozzleInletBC` / `applyNozzleExitBC`).
+The nozzle inlet closes the subsonic boundary by extrapolating the velocity from the first interior cell and fixing T and p from the stagnation state (`T = T₀ − u²/2c_p`, isentropic p), which holds total pressure at exactly p₀. Do not swap this for the simple-wave invariant `u + 2a/(γ−1) = 2a₀/(γ−1)`: that is an unsteady-expansion relation and bleeds ~γ·M·p₀ of total pressure, so the nozzle never chokes; the exit switches between imposed back pressure and full extrapolation based on the local exit Mach. See `nozzle.js` (`applyNozzleInletBC` / `applyNozzleExitBC`).
 
 ---
 
@@ -214,7 +217,7 @@ If you suspect a bug, check these first.
 6. **Forgetting to recompute Δt each step.** A Δt fixed from the initial condition violates CFL once shocks form.
 7. **In 2D, swapping x and y indices** in nested loops (especially flux assembly and the flat `j*(Nx+4)+i` indexing). Output looks plausible but is wrong. Test 2D against a known 1D solution by collapsing one direction first.
 8. **Allocating inside the 2D time loop.** The buffers in `initState2D` are reused deliberately; new allocations each step tank performance.
-9. **Loading `nozzle.js` before `solver.js`.** It reuses solver globals and will throw `ReferenceError` otherwise. In the browser, script order matters; in Node, `require("./solver")` first.
+9. **Loading `nozzle.js` before `solver.js` in the browser.** It reuses solver globals and will throw `ReferenceError` otherwise, so script order matters. In Node, `nozzle.js` `require`s `./solver` itself (the `var` block at its top). Only alias solver.js *function declarations* there, and only with `var`: `const` would collide with the browser globals, and so would `var FLUXES`, because solver.js declares `FLUXES` with `const` (nozzle.js reads it through `_fluxTable()` instead). Load both pages in a browser after touching this block.
 10. **Assuming `extract`/`extract2D` return ghosted arrays.** They return interior-only fields for display; the raw ghosted state lives on the state object (`rho`/`mom`/`ene`).
 
 ---
@@ -222,8 +225,9 @@ If you suspect a bug, check these first.
 ## 9. Output and post-processing
 
 There is **no file output** — this is an interactive browser tool, not a batch solver.
-- **1D (`index.html`):** a canvas "inside the tube" strip (density / schlieren / pressure / Mach) plus SVG line plots (ρ, u, p, e and derived M, T, s, a), with the exact/isentropic reference drawn as a dashed overlay. Live animation advects Lagrangian tracer particles.
-- **2D (`index2d.html`):** a canvas heatmap (density / schlieren / pressure / Mach) rendered via `ImageData`, plus SVG line-outs cut through the x- and y-midlines.
+- **1D (`index.html`):** a canvas "inside the tube" strip (density / schlieren / pressure / Mach) plus canvas line plots (ρ, u, p, e and derived M, T, s, a), with the exact/isentropic reference drawn as a dashed overlay. Playback advects Lagrangian tracer particles. The nozzle adds ṁ(x) and a steady-state convergence (residual) plot.
+- **2D (`index2d.html`):** a canvas heatmap (density / schlieren / pressure / Mach) rendered via `ImageData`, plus line-outs along two cuts the user places by clicking.
+- **Runs are recorded and replayable.** `LabUI.Player` computes in ~10 ms slices per animation frame (never blocking the page), records a frame each time the solution passes the next multiple of `t_end / maxFrames`, and plays them back at a steady rate with a scrubbable timeline. It never clips a step to land on a frame time — that would add a sliver step per frame.
 - For headless/batch work, `require` the solver from Node and read the arrays from `extract*` directly (see the README's Programmatic API and `test.js`).
 
 If you add export (CSV/JSON/PNG), it belongs in the UI layer, not the math files.
@@ -236,7 +240,7 @@ If you add export (CSV/JSON/PNG), it belongs in the UI layer, not the math files
 - **Variable naming:** physical quantities use their symbols (`rho`, `u`, `v`, `p`, `E`, `gamma`, `cfl`); loop indices `i, j, k`; wave speeds `SL, SR, sStar`. Readers of Toro/Teschner should be able to scan the code.
 - **Comments** point at the *equation reference* (`// Toro Eq. 10.37: contact speed`) rather than restating the code.
 - **Magic numbers:** every numerical constant gets a name (`gamma`, `cfl`, `eps = 1e-8/1e-12`). No bare floats mid-expression.
-- **UI:** React via Babel-standalone, function components with hooks. Keep the visual style (Fraunces + JetBrains Mono, `#efe9d8` background, `#8b3a2f` accent). The pages register a **classic** JSX runtime preset (`react-classic`) so Babel-standalone emits `React.createElement` — do not switch to the automatic runtime, which emits an ES-module `import` a non-module page can't resolve.
+- **UI:** React via Babel-standalone, function components with hooks. Keep the workspace layout (top bar, control rail, stage, transport bar, plot grid) and the dark instrument-panel style: colour tokens on `:root` in `lab.css` (rust `#e2724b` accent, amber `#d7a33c` for live/cursor), system mono + serif font stacks, and the warm cream → rust colormap for fields. Numerical solution = solid accent line, analytical reference = dashed grey, in every plot. Draw plots and fields on `<canvas>` (not SVG) so per-frame updates stay cheap. The pages register a **classic** JSX runtime preset (`react-classic`) so Babel-standalone emits `React.createElement` — do not switch to the automatic runtime, which emits an ES-module `import` a non-module page can't resolve.
 
 ---
 

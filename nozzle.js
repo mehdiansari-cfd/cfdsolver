@@ -4,8 +4,28 @@
    Equations:  dU/dt + dF/dx = H
                H = -(dA/dx)/A * [rho*u, rho*u^2, u*(E+p)]
    A(x): parabolic profiles, A_throat = 1 by convention.
-   Depends on solver.js globals: primToCons, FLUXES, minmod, computeRhs, extract
+   Depends on solver.js: primToCons, FLUXES, hllc, computeRhs, stableDt, extract
    ============================================================ */
+
+// ---------- Dependencies on solver.js ----------
+// Browser: solver.js is loaded first and its functions are page globals, so
+// `typeof primToCons` is "function" and this block is skipped (a bare `var`
+// redeclaration of a global *function* leaves it untouched).
+// Node: module scope does not see another module's functions, so pull them in
+// explicitly. Only function declarations may be aliased with `var` here:
+// solver.js declares FLUXES with `const`, and a `var FLUXES` anywhere in this
+// file would be a redeclaration error in the browser — see _fluxTable().
+if (typeof primToCons === "undefined" && typeof require === "function") {
+  var _solver    = require("./solver");
+  var primToCons = _solver.primToCons;
+  var hllc       = _solver.hllc;
+  var computeRhs = _solver.computeRhs;
+  var stableDt   = _solver.stableDt;
+  var extract    = _solver.extract;
+}
+function _fluxTable() {
+  return typeof FLUXES !== "undefined" ? FLUXES : _solver.FLUXES;
+}
 
 // ---------- Area profiles ----------
 // AR = A_max / A_throat  (A_throat = 1 by convention)
@@ -67,30 +87,26 @@ function computeNozzleRhs(rho, mom, ene, N, dx, gamma, fluxFn, A, dA) {
 }
 
 // ---------- Inlet BC: isentropic reservoir ----------
-// Fixes total conditions (p0, T0) at the reservoir.
-// Uses the outgoing Riemann invariant from the interior to set the ghost cells.
+// Subsonic inflow from a stagnation reservoir (Anderson, CFD: The Basics, Ch. 7):
+// one characteristic leaves the domain, so the velocity is extrapolated from
+// the first interior cell; the two incoming ones fix the stagnation state, so
+// T and p follow from (T0, p0) along the steady isentrope
+//     T = T0 - u^2 / (2 cp),   cp = gamma / (gamma - 1)   (R = 1)
+//     p = p0 (T / T0)^(gamma / (gamma - 1))
+// This holds total enthalpy and total pressure at exactly (T0, p0). (A simple-
+// wave Riemann invariant u + 2a/(gamma-1) = 2a0/(gamma-1) does not: it is an
+// unsteady-expansion relation and bleeds ~gamma*M*p0 of total pressure.)
 function applyNozzleInletBC(rho, mom, ene, gamma, p0, T0) {
   const gm1 = gamma - 1;
-  const r1 = rho[2], m1 = mom[2], e1 = ene[2];
-  const u1 = m1 / r1;
-  const p1 = (gamma - 1) * (e1 - 0.5 * r1 * u1 * u1);
-  const a1 = Math.sqrt(gamma * Math.max(p1, 1e-12) / Math.max(r1, 1e-12));
+  const cp  = gamma / gm1;
+  // Inflow from a reservoir at rest is at most sonic: u^2 <= a*^2 = 2 gamma T0 / (gamma + 1)
+  const uMax = Math.sqrt(2 * gamma * T0 / (gamma + 1));
+  // No backflow into the reservoir
+  const u_b = Math.min(Math.max(mom[2] / rho[2], 0), uMax);
 
-  // Reservoir stagnation sound speed: a0^2 = gamma*R*T0, R=1
-  const a0   = Math.sqrt(gamma * T0);
-  // Riemann invariants: J+ from reservoir (u=0), J- extrapolated from interior
-  const Jpos = 2 * a0 / gm1;
-  const Jneg = u1 - 2 * a1 / gm1;
-
-  let u_b = 0.5 * (Jpos + Jneg);
-  let a_b = 0.25 * gm1 * (Jpos - Jneg);
-  // Guard against bad states during transients
-  u_b = Math.max(u_b, 0);
-  a_b = Math.max(a_b, 1e-6);
-
-  const T_b   = a_b * a_b / gamma;
-  const p_b   = p0 * Math.pow(a_b / a0, 2 * gamma / gm1);
-  const rho_b = p_b / Math.max(T_b, 1e-12);
+  const T_b   = T0 - u_b * u_b / (2 * cp);
+  const p_b   = p0 * Math.pow(T_b / T0, gamma / gm1);
+  const rho_b = p_b / T_b;
   const [rg, mg, eg] = primToCons(rho_b, u_b, p_b, gamma);
   rho[0] = rg; mom[0] = mg; ene[0] = eg;
   rho[1] = rg; mom[1] = mg; ene[1] = eg;
@@ -124,7 +140,6 @@ function initNozzleState(p) {
   const tot = N + 4;
   const T0_safe = Math.max(T0, 1e-6);
   const a0 = Math.sqrt(gamma * T0_safe);
-  const rho0 = p0 / T0_safe;
 
   const rho = new Array(tot), mom = new Array(tot), ene = new Array(tot);
   // Linear pressure gradient from p0 at inlet to pb at exit, isentropic temperature.
@@ -150,22 +165,13 @@ function initNozzleState(p) {
 // ---------- Step forward to tTarget (SSP-RK2 + adaptive CFL) ----------
 function nozzleStepUntil(state, tTarget) {
   const { N, dx, gamma, cfl, A, dA, p0, T0, pb } = state;
-  const fluxFn = FLUXES[state.flux] || hllc;
+  const fluxFn = _fluxTable()[state.flux] || hllc;
   let { rho, mom, ene, t, step } = state;
   let budget = 80000;
 
   while (t < tTarget && budget-- > 0) {
-    let maxSpeed = 0;
-    for (let i = 0; i < N; i++) {
-      const k = i + 2;
-      const u = mom[k] / rho[k];
-      const p = (gamma - 1) * (ene[k] - 0.5 * rho[k] * u * u);
-      const a = Math.sqrt(gamma * Math.max(p, 1e-12) / Math.max(rho[k], 1e-12));
-      const s = Math.abs(u) + a;
-      if (s > maxSpeed) maxSpeed = s;
-    }
-    if (maxSpeed < 1e-12) break;
-    let dt = cfl * dx / maxSpeed;
+    let dt = stableDt({ rho, mom, ene, N, dx, gamma, cfl });
+    if (!(dt < Infinity)) break;
     if (t + dt > tTarget) dt = tTarget - t;
 
     // Stage 1
@@ -275,11 +281,13 @@ function isentropicSolution(state, branch) {
 // ---------- Presets ----------
 const NOZZLE_PRESETS = {
   // pb values are chosen to produce the labeled flow regime for AR=2, gamma=1.4.
-  // Subsonic M_exit ≈ 0.306, p_exit/p0 ≈ 0.938  →  just below that for choked divergent section
-  // Design-pt M_exit ≈ 2.197, p_exit/p0 ≈ 0.094
-  // Normal shock at exit: p2/p0 ≈ 0.594  →  pb between 0.94 and 0.59 gives shock inside nozzle
-  "Subsonic CD":       { type: "CD",          AR: 2.0, p0: 1, T0: 1, pb: 0.97,  N: 300, L: 1, gamma: 1.4, cfl: 0.4,  tEnd: 6,  branch: "subsonic"    },
-  "Choked CD":         { type: "CD",          AR: 2.0, p0: 1, T0: 1, pb: 0.93,  N: 300, L: 1, gamma: 1.4, cfl: 0.4,  tEnd: 8,  branch: "subsonic"    },
+  // Choked, subsonic branch: M_exit ≈ 0.306, p_exit/p0 ≈ 0.937  →  pb above this never chokes
+  // Design point:            M_exit ≈ 2.197, p_exit/p0 ≈ 0.094
+  // Normal shock at exit:    p2/p0 ≈ 0.513  →  pb in (0.513, 0.937) puts a shock inside the
+  //                          divergent section (pb = 0.93 gives a weak one just past the throat)
+  // tEnd is long enough for each regime to settle to steady state from the initial guess.
+  "Subsonic CD":       { type: "CD",          AR: 2.0, p0: 1, T0: 1, pb: 0.97,  N: 300, L: 1, gamma: 1.4, cfl: 0.4,  tEnd: 60, branch: "subsonic"    },
+  "Choked CD":         { type: "CD",          AR: 2.0, p0: 1, T0: 1, pb: 0.93,  N: 300, L: 1, gamma: 1.4, cfl: 0.4,  tEnd: 30, branch: "subsonic"    },
   "Normal Shock":      { type: "CD",          AR: 2.0, p0: 1, T0: 1, pb: 0.75,  N: 300, L: 1, gamma: 1.4, cfl: 0.35, tEnd: 15, branch: "subsonic"    },
   "Full Supersonic CD":{ type: "CD",          AR: 2.0, p0: 1, T0: 1, pb: 0.09,  N: 300, L: 1, gamma: 1.4, cfl: 0.35, tEnd: 20, branch: "supersonic"  },
   "Convergent":        { type: "convergent",  AR: 3.0, p0: 1, T0: 1, pb: 0.60,  N: 300, L: 1, gamma: 1.4, cfl: 0.4,  tEnd: 5,  branch: "subsonic"    },

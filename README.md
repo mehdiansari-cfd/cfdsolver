@@ -42,7 +42,7 @@ The math lives in `solver.js`, `nozzle.js`, and `solver2d.js` as pure modules wi
 
 ## Who it's for
 
-**For students.** Land on the [live demo](https://mehdiansari-cfd.github.io/cfdsolver/), click a preset (start with Sod), and hit *run* or *animate*. Toggle the *exact overlay* to see how close the numerical solution gets, then switch the *flux* dropdown between HLLC, HLL, Roe, and Rusanov to watch a contact discontinuity sharpen or smear. The nozzle tab makes choking and shock-in-nozzle behaviour tangible; the 2D tab shows how a radial shock or a shear layer evolves. No setup stands between you and the physics.
+**For students.** Land on the [live demo](https://mehdiansari-cfd.github.io/cfdsolver/), click a preset (start with Sod) — it solves immediately — then hit *play* or drag the timeline. Toggle the *exact overlay* to see how close the numerical solution gets, then switch the *flux* dropdown between HLLC, HLL, Roe, and Rusanov to watch a contact discontinuity sharpen or smear. The nozzle tab makes choking and shock-in-nozzle behaviour tangible; the 2D tab shows how a radial shock or a shear layer evolves. No setup stands between you and the physics.
 
 **For researchers / instructors.** The solvers are DOM-free CommonJS modules, so you can drive them headlessly from Node for convergence studies, order-of-accuracy checks against the exact Riemann and isentropic references, or as a scratchpad for a new flux or limiter. The [Programmatic API](#programmatic-api) section shows the entry points; [`test.js`](test.js) is a worked example (see [Validation](#validation)). Because everything is a few hundred lines of readable JavaScript with no build step, it's easy to fork, instrument, and drop a new scheme into the `FLUXES` table.
 
@@ -66,7 +66,7 @@ with a Riemann initial condition — two constant states separated by a diaphrag
 dU/dt + dF(U)/dx = H,    H = -(1/A) (dA/dx) · [ρu, ρu², u(E+p)]
 ```
 
-driven by a stagnation reservoir `(p₀, T₀)` at the inlet (closed with the outgoing Riemann invariant) and a static back pressure `p_b` at the exit (switching automatically between subsonic and supersonic behaviour as the local exit Mach crosses unity). Time-marched to steady state.
+driven by a stagnation reservoir `(p₀, T₀)` at the inlet (velocity extrapolated from the interior, temperature and pressure fixed by the stagnation state) and a static back pressure `p_b` at the exit (switching automatically between subsonic and supersonic behaviour as the local exit Mach crosses unity). Time-marched to steady state.
 
 **2D Cartesian** (full two-dimensional Euler):
 
@@ -113,11 +113,13 @@ See [`test.js`](test.js) for the exact tolerances and setups, and [`CONTRIBUTING
 
 **Two boundary conditions.** Transmissive (zero-gradient) or reflective (mirror with sign flip on momentum). The exact overlay auto-disables for reflective BCs, since the analytical solution assumes an infinite domain.
 
-**Four tube views.** The horizontal "inside the tube" strip can render density, schlieren-style `|∂ρ/∂x|`, pressure, or Mach number as a grey-scale field.
+**Four tube views.** The horizontal "inside the tube" strip can render density, schlieren-style `|∂ρ/∂x|`, pressure, or Mach number through a warm cream → rust colormap, with a colour bar.
 
 **Eight scalar plots.** Top row: ρ, u, p, e. Bottom row (toggleable): Mach M = u/a, temperature T = p/ρ (non-dim, R=1), entropy s = ln(p/ρ^γ), and sound speed a = √(γp/ρ).
 
-**Live animation.** Hit "animate flow" to march the solution forward in 90 frames while a few hundred Lagrangian tracer particles drift with the local velocity field, drawing short streaks across the tube.
+**Live, scrubbable runs.** *Solve* computes in small time-budgeted slices between animation frames, so the page never freezes and the view follows the solution as it develops. Every run is recorded, so *play* replays it at a steady 60 fps (0.25×–4×) and the timeline scrubs to any moment. A few hundred Lagrangian tracer particles drift with the local velocity field during playback.
+
+**Linked probe.** Hovering any plot or the field view puts a cursor at that position in every panel and reads out ρ, u, p, M, T there.
 
 **Five classic presets.** Sod, Lax, the 1-2-3 problem, the strong shock, and the Woodward-Colella blast wave — one click each.
 
@@ -162,7 +164,7 @@ Quasi-1D Euler in a duct with cross-section `A(x)`. The flux divergence is reuse
 
 **Boundary conditions** — physically motivated rather than zero-gradient:
 
-- **Inlet:** isentropic reservoir at `(p₀, T₀)`. The incoming Riemann invariant is fixed from the reservoir; the outgoing invariant is extrapolated from the first interior cell. This naturally handles subsonic inflow and chokes cleanly when the throat reaches `M = 1`.
+- **Inlet:** isentropic reservoir at `(p₀, T₀)`. One characteristic leaves through a subsonic inlet, so the velocity is extrapolated from the first interior cell; the two incoming ones fix the stagnation state, giving `T = T₀ − u²/(2c_p)` and `p = p₀(T/T₀)^{γ/(γ−1)}`. Total pressure and enthalpy enter at exactly `(p₀, T₀)`, so the nozzle chokes at the theoretical mass flow once the throat reaches `M = 1`.
 - **Exit:** static back pressure `p_b` when the exit is subsonic; full extrapolation when the exit is supersonic. The switch is driven by the local exit Mach, so a CD nozzle can transition through choked → shock-in-divergent → fully supersonic without changing the BC code.
 
 **Isentropic analytical overlay.** Inverts the `A/A*` area-Mach relation by bisection on each cell. In a CD nozzle the convergent half is always subsonic; the divergent half follows the user-selected `branch` (subsonic for a Venturi, supersonic for a fully-expanded design point). Useful as a sanity reference, but note that the analytical solution is *not* valid when a normal shock sits in the divergent section.
@@ -172,7 +174,7 @@ Quasi-1D Euler in a duct with cross-section `A(x)`. The flux divergence is reuse
 | Preset             | Type       | AR  | p_b  | branch     | Notes |
 |--------------------|------------|-----|------|------------|-------|
 | Subsonic CD        | CD         | 2.0 | 0.97 | subsonic   | Venturi regime, isentropic acceleration then deceleration. |
-| Choked CD          | CD         | 2.0 | 0.93 | subsonic   | Throat at M = 1, subsonic recompression downstream. |
+| Choked CD          | CD         | 2.0 | 0.93 | subsonic   | Throat at M = 1, a weak shock just past it, then subsonic recompression. |
 | Normal Shock       | CD         | 2.0 | 0.75 | subsonic   | Shock stands inside the divergent section. |
 | Full Supersonic CD | CD         | 2.0 | 0.09 | supersonic | Design-point expansion to M ≈ 2.2 at the exit. |
 | Convergent         | convergent | 3.0 | 0.60 | subsonic   | Pure acceleration up to (at most) sonic at the exit. |
@@ -188,7 +190,7 @@ Full two-dimensional compressible Euler on a Cartesian grid. The 1D Riemann solv
 
 Storage is laid out as flat `Float64Array`s of length `(Nx+4) × (Ny+4)` (two ghost cells per side), and all the slope / flux / RHS buffers are allocated once in `initState2D` and reused — this keeps the JS engine off the heap during the time loop and makes Nx = Ny = 200 comfortably interactive in the browser.
 
-The 2D UI (`index2d.html`) is the parallel page to the shock-tube lab: a canvas heatmap (density, schlieren, pressure, or Mach) with two SVG line-out plots cut through the x- and y-midlines so you can read wave structure quantitatively.
+The 2D UI (`index2d.html`) is the parallel page to the shock-tube lab: a canvas heatmap (density, schlieren, pressure, or Mach) with line-outs of ρ and p along two cuts so you can read wave structure quantitatively. Click the heatmap to move the cuts; hover to probe (ρ, u, v, p, M).
 
 ### 2D test problems
 
@@ -205,8 +207,10 @@ The 2D UI (`index2d.html`) is the parallel page to the shock-tube lab: a canvas 
 
 ```
 cfdsolver/
-├── index.html          1D UI: shock tube + nozzle (React via Babel-standalone, canvas + SVG)
-├── index2d.html        2D UI: heatmap + centerline line-outs (React via Babel-standalone)
+├── index.html          1D UI: shock tube + nozzle (React via Babel-standalone, canvas)
+├── index2d.html        2D UI: heatmap + line-outs along movable cuts
+├── labui.js            Shared UI layer: playback engine, canvas plots, controls (no math)
+├── lab.css             Shared workspace stylesheet
 ├── solver.js           1D shock-tube math: fluxes, MUSCL, SSP-RK2, exact Riemann
 ├── nozzle.js           Quasi-1D nozzle math: area source, reservoir + back-pressure BCs,
 │                       isentropic A/A* overlay. Builds on solver.js's flux machinery.
@@ -219,7 +223,7 @@ cfdsolver/
 └── README.md           This file
 ```
 
-`solver.js`, `nozzle.js`, and `solver2d.js` know nothing about the DOM. The HTML files know nothing about HLLC. They communicate through plain JS globals. `nozzle.js` depends on `solver.js` (it reuses `primToCons`, `FLUXES`, `computeRhs`, and `extract`), so when used together `solver.js` must be loaded first. `solver2d.js` is self-contained — it does not import `solver.js`.
+`solver.js`, `nozzle.js`, and `solver2d.js` know nothing about the DOM. The HTML files know nothing about HLLC. They communicate through plain JS globals. `labui.js` is UI-only too: it drives any solver through `init` / `advance` / `stableDt` callbacks and knows nothing about the equations. `nozzle.js` depends on `solver.js` (it reuses `primToCons`, `FLUXES`, `computeRhs`, `stableDt`, and `extract`), so in the browser `solver.js` must be loaded first; in Node, `nozzle.js` requires it itself. `solver2d.js` is self-contained — it does not import `solver.js`.
 
 ---
 
@@ -255,6 +259,7 @@ Public surface:
 - `minmod(a, b)` — the slope limiter.
 - `applyBcs(ρ, m, E, "transmissive" | "reflective")`.
 - `computeRhs(ρ, m, E, N, Δx, γ, fluxFn?)` — MUSCL + flux divergence on interior cells.
+- `stableDt(state)` — the CFL-limited time step `CFL · Δx / max(|u| + a)` (2D: `stableDt2D`).
 - `initState(params)` / `stepUntil(state, tTarget)` — drive the simulation forward.
 - `extract(state)` — primitive + derived fields on interior cells.
 - `exactRiemann(left, right, γ, x₀, t, xArr)` — analytical solution sampled at `xArr`; returns `null` if vacuum forms.
@@ -264,8 +269,7 @@ Public surface:
 ### Nozzle
 
 ```js
-require("./solver");                 // must load first — nozzle reuses its globals
-const Z = require("./nozzle");
+const Z = require("./nozzle");       // requires ./solver itself
 
 const params = {
   type: "CD", AR: 2.0,               // convergent-divergent, area ratio 2
@@ -286,7 +290,7 @@ Public surface:
 - `nozzleArea(x, L, AR, type)` / `nozzleAreaDeriv(...)` — the three area profiles `"convergent" | "divergent" | "CD"` and their derivatives.
 - `buildAreaArrays(N, dx, L, AR, type)` — precomputed `A` and `dA/dx` on the ghosted grid.
 - `computeNozzleRhs(ρ, m, E, N, Δx, γ, fluxFn, A, dA)` — flux divergence plus the geometric source.
-- `applyNozzleInletBC(ρ, m, E, γ, p₀, T₀)` — reservoir closure via outgoing Riemann invariant.
+- `applyNozzleInletBC(ρ, m, E, γ, p₀, T₀)` — reservoir closure: extrapolated velocity, stagnation `(p₀, T₀)` held fixed.
 - `applyNozzleExitBC(ρ, m, E, γ, p_b, N)` — back-pressure / supersonic-extrapolation switch.
 - `initNozzleState(params)` / `nozzleStepUntil(state, tTarget)` — drive the nozzle simulation.
 - `extractNozzle(state)` — primitives + derived fields, *plus* `pt` (total pressure) and `A(x)`.
@@ -340,8 +344,12 @@ Public surface:
 | Tube               | What scalar to render in the horizontal strip: ρ, schlieren, p, or M.         |
 | Exact overlay      | Dashed grey reference curve on every plot. Skipped for reflective BCs.        |
 | Derived fields     | Show or hide the second row of plots (M, T, s, a).                            |
-| Run to t_end       | One-shot simulation to the final time.                                        |
-| Animate flow       | Frame-by-frame march with Lagrangian tracer streaks.                          |
+| Solve (Enter)      | Compute to t_end without freezing the page; the view follows the run.         |
+| Play (Space)       | Replay the recorded run at a steady rate, with Lagrangian tracer streaks.     |
+| ‹ › (← →)          | Step one recorded frame back / forward.                                       |
+| Timeline / speed   | Scrub to any moment; playback at 0.25×–4×.                                    |
+| Hover              | Linked probe cursor across the field view and every plot.                     |
+| ? button / key     | Help panel with the keyboard shortcuts.                                       |
 
 ---
 

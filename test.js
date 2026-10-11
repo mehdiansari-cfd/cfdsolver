@@ -14,11 +14,16 @@
      3. Conservation — total mass and energy are conserved to
                       near machine precision while the waves stay
                       inside a transmissive domain.
+     4. Nozzle      — the quasi-1D nozzle loads standalone in Node,
+                      the reservoir inlet holds total pressure p0,
+                      the choked mass flow matches theory, and the
+                      design-point flow matches the isentropic
+                      solution.
    ============================================================ */
 
 const assert = require("assert");
 const S  = require("./solver");
-require("./solver");            // nozzle reuses solver's globals if needed
+const Z  = require("./nozzle");   // pulls in what it needs from ./solver itself
 const S2 = require("./solver2d");
 
 let passed = 0;
@@ -154,6 +159,52 @@ check("Sod conserves mass and energy to ~1e-10", () => {
   const de = Math.abs(e1 - e0) / Math.abs(e0);
   assert(dm < 1e-10, "mass drift " + dm.toExponential(3) + " exceeds 1e-10");
   assert(de < 1e-10, "energy drift " + de.toExponential(3) + " exceeds 1e-10");
+});
+
+// ---- 4. Nozzle -------------------------------------------------------------
+// Steady quasi-1D theory (Anderson, Modern Compressible Flow Ch. 5), R = 1:
+// a choked nozzle passes mdot = p0 A* sqrt(gamma/T0) (2/(gamma+1))^((gamma+1)/(2(gamma-1))),
+// and wherever the flow is shock-free the total pressure stays at p0.
+
+console.log("Nozzle (reservoir inlet, choking, isentropic design point):");
+
+function runNozzle(name) {
+  const q = Z.NOZZLE_PRESETS[name];
+  let s = Z.initNozzleState(q);
+  s = Z.nozzleStepUntil(s, q.tEnd);
+  return { q, s, sol: Z.extractNozzle(s) };
+}
+
+check("nozzle.js loads in Node without solver globals", () => {
+  for (const fn of ["initNozzleState", "nozzleStepUntil", "extractNozzle", "isentropicSolution"]) {
+    assert.strictEqual(typeof Z[fn], "function", fn + " not exported");
+  }
+});
+
+check("Choked CD: inlet total pressure = p0, throat sonic, mdot = choked theory", () => {
+  const { q, sol } = runNozzle("Choked CD");
+  const g = q.gamma, N = sol.x.length;
+  const ptIn = sol.pt[0];
+  assert(Math.abs(ptIn - q.p0) / q.p0 < 5e-3, "inlet total pressure " + ptIn.toFixed(4) + " != p0");
+  const Mthroat = sol.M[N >> 1];
+  assert(Math.abs(Mthroat - 1) < 0.03, "throat Mach " + Mthroat.toFixed(3) + " not sonic");
+  const mdotTheory = q.p0 * Math.sqrt(g / q.T0) * Math.pow(2 / (g + 1), (g + 1) / (2 * (g - 1)));
+  for (const i of [0, N >> 1, N - 1]) {
+    const mdot = sol.rho[i] * sol.u[i] * sol.A[i];
+    assert(Math.abs(mdot - mdotTheory) / mdotTheory < 0.01,
+           "mdot " + mdot.toFixed(4) + " at i=" + i + " vs theory " + mdotTheory.toFixed(4));
+  }
+});
+
+check("Full Supersonic CD matches the isentropic solution", () => {
+  const { q, s, sol } = runNozzle("Full Supersonic CD");
+  const iso = Z.isentropicSolution(s, q.branch);
+  const N = sol.x.length;
+  for (let i = 0; i < N; i++) {
+    assert(Math.abs(sol.M[i] - iso.M[i]) < 0.03, "Mach off by " + Math.abs(sol.M[i] - iso.M[i]).toFixed(3) + " at i=" + i);
+    assert(Math.abs(sol.p[i] - iso.p[i]) / iso.p[i] < 0.03, "pressure off by " +
+           (100 * Math.abs(sol.p[i] - iso.p[i]) / iso.p[i]).toFixed(1) + "% at i=" + i);
+  }
 });
 
 // ---- summary ---------------------------------------------------------------

@@ -24,6 +24,7 @@
      - FLUXES2D                          name -> flux function
      - applyBcs2D(state)                 transmissive on all four walls
      - initState2D(params)
+     - stableDt2D(state)                 CFL-limited time step
      - stepUntil2D(state, tTarget)
      - extract2D(state)                  -> { Nx, Ny, xs, ys, rho, u, v, p, M, e }
      - slice2D(field, Nx, Ny, axis, idx) -> 1D array along x or y
@@ -394,34 +395,41 @@ function initState2D(params) {
   return state;
 }
 
+// ---------- Stable time step from the CFL condition ----------
+// dt = CFL * min(dx, dy) / max(|u| + |v| + a) over the interior, recomputed
+// every step (CLAUDE.md §4, §8.6).
+function stableDt2D(state) {
+  const { rho, mu, mv, E, Nx, Ny, dx, dy, gamma, cfl } = state;
+  const Nxt = Nx + 4;
+  let maxSpeed = 0;
+  for (let j = 2; j < Ny + 2; j++) {
+    const row = j * Nxt;
+    for (let i = 2; i < Nx + 2; i++) {
+      const k = row + i;
+      const r = rho[k];
+      const u = mu[k] / r, v = mv[k] / r;
+      const p = _pressure2D(r, u, v, E[k], gamma);
+      const a = _sound2D(p, r, gamma);
+      const s = Math.abs(u) + Math.abs(v) + a;
+      if (s > maxSpeed) maxSpeed = s;
+    }
+  }
+  return cfl * Math.min(dx, dy) / maxSpeed;
+}
+
 // ---------- Time-stepping (SSP-RK2 + adaptive CFL) ----------
 function stepUntil2D(state, tTarget) {
-  const { Nx, Ny, dx, dy, gamma, cfl } = state;
+  const { Nx, Ny } = state;
   const Nxt = Nx + 4;
   const fluxFn = FLUXES2D[state.flux] || hllc2d;
   const { rho, mu, mv, E, work } = state;
   const { rho1, mu1, mv1, E1, r1, r2, r3, r4 } = work;
   let t = state.t, step = state.step;
   let budget = 50000;
-  const hMin = Math.min(dx, dy);
 
   while (t < tTarget && budget-- > 0) {
-    // Adaptive dt
-    let maxSpeed = 0;
-    for (let j = 2; j < Ny + 2; j++) {
-      const row = j * Nxt;
-      for (let i = 2; i < Nx + 2; i++) {
-        const k = row + i;
-        const r = rho[k];
-        const u = mu[k] / r, v = mv[k] / r;
-        const p = _pressure2D(r, u, v, E[k], gamma);
-        const a = _sound2D(p, r, gamma);
-        const s = Math.abs(u) + Math.abs(v) + a;
-        if (s > maxSpeed) maxSpeed = s;
-      }
-    }
-    if (!(maxSpeed > 0)) break;
-    let dt = cfl * hMin / maxSpeed;
+    let dt = stableDt2D(state);
+    if (!(dt < Infinity)) break;
     if (t + dt > tTarget) dt = tTarget - t;
 
     // Stage 1: U1 = U + dt * L(U)
@@ -558,7 +566,7 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     hllc2d, hll2d, roe2d, rusanov2d, FLUXES2D,
     applyBcs2D, computeRhs2D,
-    initState2D, stepUntil2D, extract2D, slice2D,
+    initState2D, stableDt2D, stepUntil2D, extract2D, slice2D,
     PRESETS2D
   };
 }
