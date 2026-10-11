@@ -141,12 +141,12 @@ Composite conditions in this codebase:
 |---------------------|-------|-------------|-----------------|---------|
 | Transmissive (open) | 1D shock tube, all 2D walls | Neumann | Neumann | Neumann |
 | Reflective / inviscid wall | 1D shock tube option | Dirichlet (0) | Neumann | Neumann |
-| Reservoir inlet     | nozzle | from Riemann invariant | — | isentropic from `(p₀, T₀)` |
+| Reservoir inlet     | nozzle | extrapolated from interior | — | isentropic from `(p₀, T₀)` |
 | Back-pressure / supersonic outlet | nozzle | Neumann | — | `p_b` (subsonic) or full extrapolation (supersonic) |
 
 Reflective walls: copy the conserved state from the interior cell and **negate the normal momentum component**; tangential momentum is copied as-is. With ghost cells, mirror across the boundary index. For 2D, south/north treat y-momentum as normal, east/west treat x-momentum as normal.
 
-The nozzle inlet closes the subsonic boundary by fixing the incoming Riemann invariant from the reservoir and extrapolating the outgoing one from the first interior cell; the exit switches between imposed back pressure and full extrapolation based on the local exit Mach. See `nozzle.js` (`applyNozzleInletBC` / `applyNozzleExitBC`).
+The nozzle inlet closes the subsonic boundary by extrapolating the velocity from the first interior cell and fixing T and p from the stagnation state (`T = T₀ − u²/2c_p`, isentropic p), which holds total pressure at exactly p₀. Do not swap this for the simple-wave invariant `u + 2a/(γ−1) = 2a₀/(γ−1)`: that is an unsteady-expansion relation and bleeds ~γ·M·p₀ of total pressure, so the nozzle never chokes; the exit switches between imposed back pressure and full extrapolation based on the local exit Mach. See `nozzle.js` (`applyNozzleInletBC` / `applyNozzleExitBC`).
 
 ---
 
@@ -214,7 +214,7 @@ If you suspect a bug, check these first.
 6. **Forgetting to recompute Δt each step.** A Δt fixed from the initial condition violates CFL once shocks form.
 7. **In 2D, swapping x and y indices** in nested loops (especially flux assembly and the flat `j*(Nx+4)+i` indexing). Output looks plausible but is wrong. Test 2D against a known 1D solution by collapsing one direction first.
 8. **Allocating inside the 2D time loop.** The buffers in `initState2D` are reused deliberately; new allocations each step tank performance.
-9. **Loading `nozzle.js` before `solver.js`.** It reuses solver globals and will throw `ReferenceError` otherwise. In the browser, script order matters; in Node, `require("./solver")` first.
+9. **Loading `nozzle.js` before `solver.js` in the browser.** It reuses solver globals and will throw `ReferenceError` otherwise, so script order matters. In Node, `nozzle.js` `require`s `./solver` itself (the `var` block at its top); keep those names `var`, since `const` would collide with the browser globals.
 10. **Assuming `extract`/`extract2D` return ghosted arrays.** They return interior-only fields for display; the raw ghosted state lives on the state object (`rho`/`mom`/`ene`).
 
 ---

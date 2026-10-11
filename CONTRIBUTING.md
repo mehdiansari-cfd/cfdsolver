@@ -32,7 +32,7 @@ the case — the default answer is "keep it vanilla."
 
 The math layers know nothing about the DOM; the HTML knows nothing about HLLC.
 They communicate through plain JS globals (and CommonJS exports for Node).
-`nozzle.js` reuses `solver.js` globals, so `solver.js` must load first.
+`nozzle.js` reuses `solver.js` globals, so in the browser `solver.js` must load first (in Node, `nozzle.js` requires it itself).
 
 ## Style
 

@@ -66,7 +66,7 @@ with a Riemann initial condition — two constant states separated by a diaphrag
 dU/dt + dF(U)/dx = H,    H = -(1/A) (dA/dx) · [ρu, ρu², u(E+p)]
 ```
 
-driven by a stagnation reservoir `(p₀, T₀)` at the inlet (closed with the outgoing Riemann invariant) and a static back pressure `p_b` at the exit (switching automatically between subsonic and supersonic behaviour as the local exit Mach crosses unity). Time-marched to steady state.
+driven by a stagnation reservoir `(p₀, T₀)` at the inlet (velocity extrapolated from the interior, temperature and pressure fixed by the stagnation state) and a static back pressure `p_b` at the exit (switching automatically between subsonic and supersonic behaviour as the local exit Mach crosses unity). Time-marched to steady state.
 
 **2D Cartesian** (full two-dimensional Euler):
 
@@ -162,7 +162,7 @@ Quasi-1D Euler in a duct with cross-section `A(x)`. The flux divergence is reuse
 
 **Boundary conditions** — physically motivated rather than zero-gradient:
 
-- **Inlet:** isentropic reservoir at `(p₀, T₀)`. The incoming Riemann invariant is fixed from the reservoir; the outgoing invariant is extrapolated from the first interior cell. This naturally handles subsonic inflow and chokes cleanly when the throat reaches `M = 1`.
+- **Inlet:** isentropic reservoir at `(p₀, T₀)`. One characteristic leaves through a subsonic inlet, so the velocity is extrapolated from the first interior cell; the two incoming ones fix the stagnation state, giving `T = T₀ − u²/(2c_p)` and `p = p₀(T/T₀)^{γ/(γ−1)}`. Total pressure and enthalpy enter at exactly `(p₀, T₀)`, so the nozzle chokes at the theoretical mass flow once the throat reaches `M = 1`.
 - **Exit:** static back pressure `p_b` when the exit is subsonic; full extrapolation when the exit is supersonic. The switch is driven by the local exit Mach, so a CD nozzle can transition through choked → shock-in-divergent → fully supersonic without changing the BC code.
 
 **Isentropic analytical overlay.** Inverts the `A/A*` area-Mach relation by bisection on each cell. In a CD nozzle the convergent half is always subsonic; the divergent half follows the user-selected `branch` (subsonic for a Venturi, supersonic for a fully-expanded design point). Useful as a sanity reference, but note that the analytical solution is *not* valid when a normal shock sits in the divergent section.
@@ -172,7 +172,7 @@ Quasi-1D Euler in a duct with cross-section `A(x)`. The flux divergence is reuse
 | Preset             | Type       | AR  | p_b  | branch     | Notes |
 |--------------------|------------|-----|------|------------|-------|
 | Subsonic CD        | CD         | 2.0 | 0.97 | subsonic   | Venturi regime, isentropic acceleration then deceleration. |
-| Choked CD          | CD         | 2.0 | 0.93 | subsonic   | Throat at M = 1, subsonic recompression downstream. |
+| Choked CD          | CD         | 2.0 | 0.93 | subsonic   | Throat at M = 1, a weak shock just past it, then subsonic recompression. |
 | Normal Shock       | CD         | 2.0 | 0.75 | subsonic   | Shock stands inside the divergent section. |
 | Full Supersonic CD | CD         | 2.0 | 0.09 | supersonic | Design-point expansion to M ≈ 2.2 at the exit. |
 | Convergent         | convergent | 3.0 | 0.60 | subsonic   | Pure acceleration up to (at most) sonic at the exit. |
@@ -264,8 +264,7 @@ Public surface:
 ### Nozzle
 
 ```js
-require("./solver");                 // must load first — nozzle reuses its globals
-const Z = require("./nozzle");
+const Z = require("./nozzle");       // requires ./solver itself
 
 const params = {
   type: "CD", AR: 2.0,               // convergent-divergent, area ratio 2
@@ -286,7 +285,7 @@ Public surface:
 - `nozzleArea(x, L, AR, type)` / `nozzleAreaDeriv(...)` — the three area profiles `"convergent" | "divergent" | "CD"` and their derivatives.
 - `buildAreaArrays(N, dx, L, AR, type)` — precomputed `A` and `dA/dx` on the ghosted grid.
 - `computeNozzleRhs(ρ, m, E, N, Δx, γ, fluxFn, A, dA)` — flux divergence plus the geometric source.
-- `applyNozzleInletBC(ρ, m, E, γ, p₀, T₀)` — reservoir closure via outgoing Riemann invariant.
+- `applyNozzleInletBC(ρ, m, E, γ, p₀, T₀)` — reservoir closure: extrapolated velocity, stagnation `(p₀, T₀)` held fixed.
 - `applyNozzleExitBC(ρ, m, E, γ, p_b, N)` — back-pressure / supersonic-extrapolation switch.
 - `initNozzleState(params)` / `nozzleStepUntil(state, tTarget)` — drive the nozzle simulation.
 - `extractNozzle(state)` — primitives + derived fields, *plus* `pt` (total pressure) and `A(x)`.

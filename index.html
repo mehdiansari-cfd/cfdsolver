@@ -783,7 +783,7 @@ function NozzleApp() {
   // Load default preset on mount
   useEffect(() => { loadPreset("Choked CD"); }, []);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { runFinal({ type: "CD", AR: 2.0, p0: 1, T0: 1, pb: 0.93, N: 300, L: 1, gamma: 1.4, cfl: 0.4, tEnd: 8 }); }, []);
+  useEffect(() => { runFinal(NOZZLE_PRESETS["Choked CD"]); }, []);
 
   const C = { M: "#a4632a", p: "#4a5d23", T: "#5d4037", rho: "#8b3a2f", pt: "#2d5d6e" };
 
