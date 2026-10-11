@@ -28,6 +28,8 @@ the case — the default answer is "keep it vanilla."
 | `solver2d.js`  | 2D Cartesian Euler. Self-contained. No DOM. |
 | `index.html`   | 1D UI (shock tube + nozzle). React via Babel-standalone. |
 | `index2d.html` | 2D UI. |
+| `labui.js`     | Shared UI layer: playback engine, canvas plots, controls. No math. |
+| `lab.css`      | Shared stylesheet. |
 | `test.js`      | Zero-dependency Node verification suite. |
 
 The math layers know nothing about the DOM; the HTML knows nothing about HLLC.

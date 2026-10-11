@@ -3,227 +3,203 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>1D Euler Shock Tube Laboratory</title>
-
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<title>Euler Lab · 1D</title>
 <link rel="stylesheet" href="lab.css">
 
-
-
-<!-- React + Babel from CDN (UI rendering only) -->
-<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<!-- React + Babel from CDN (UI rendering only). Versions are pinned so an
+     upstream release can never change or break the page. -->
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
 <script>
-  // Force the classic JSX runtime (React.createElement). Recent @babel/standalone
-  // defaults preset-react to the *automatic* runtime, which emits an
-  // `import ... "react/jsx-runtime"` that a non-module page with UMD React can't
-  // resolve — leaving the page stuck on "Loading...". Registering a classic-runtime
-  // preset keeps everything buildless and dependency-free.
+  // Force the classic JSX runtime (React.createElement). The automatic runtime
+  // emits `import ... "react/jsx-runtime"`, which a non-module page with UMD
+  // React can't resolve — leaving the page stuck on "Loading...".
   Babel.registerPreset('react-classic', {
     presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
   });
 </script>
 
-<!-- CFD solver (math layer, no DOM). Must load BEFORE the UI script. -->
+<!-- Shared UI layer (playback engine, plots, controls). Needs React. -->
+<script src="labui.js"></script>
+<!-- CFD solver (math layer, no DOM). solver.js must load BEFORE nozzle.js. -->
 <script src="solver.js"></script>
 <script src="nozzle.js"></script>
 </head>
 <body>
-<div id="root">
-  <div style="padding: 40px; font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace; color: #98a0ab;">
-    Loading...
-  </div>
-</div>
+<div id="root"><div class="boot">Loading...</div></div>
 
-<!-- UI layer: React components only. Math comes from solver.js globals. -->
+<!-- UI layer: React components only. Math comes from solver.js / nozzle.js globals. -->
 <script type="text/babel" data-presets="react-classic">
+window.__eulerBooted = true;
 const { useState, useEffect, useMemo, useRef } = React;
+const {
+  fmt, CMAP, useCanvas, useSmoothRange, finiteRange, usePlayer, useShortcuts,
+  NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe
+} = LabUI;
 
-// ---------- Canvas tube view (density / pressure / Mach / schlieren) ----------
-function TubeView({ result, params, info, mode }) {
-  const canvasRef = useRef(null);
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv || !result) return;
-    const ctx = cv.getContext("2d");
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = cv.clientWidth, cssH = cv.clientHeight;
-    if (cv.width !== cssW * dpr || cv.height !== cssH * dpr) {
-      cv.width = cssW * dpr; cv.height = cssH * dpr;
+const FLUX_OPTIONS = ["HLLC", "HLL", "Roe", "Rusanov"];
+const FRAMES_1D = 300;       // recorded frames per run (scrub resolution)
+const CFL_SAFE = 0.5;        // MUSCL + SSP-RK2 practical limit (CLAUDE.md §4)
+
+// Index of the cell containing domain position x (cells of width dx from 0).
+function cellAt(x, dx, N) { return Math.max(0, Math.min(N - 1, Math.floor(x / dx))); }
+
+// Reject a state the solver can't continue from: NaN, or non-positive rho / p.
+function check1D(s) {
+  const { rho, mom, ene, N, gamma } = s;
+  for (let i = 2; i < N + 2; i++) {
+    const r = rho[i];
+    if (!(r > 0)) return "Density became non-positive or NaN";
+    const u = mom[i] / r;
+    if (!((gamma - 1) * (ene[i] - 0.5 * r * u * u) > 0)) return "Pressure became negative or NaN";
+  }
+  return null;
+}
+const recordConserved = s => ({ rho: s.rho.slice(), mom: s.mom.slice(), ene: s.ene.slice() });
+
+// Draw a scalar field as a smooth colour strip: one texel per cell, stretched
+// by drawImage with bilinear filtering so motion reads continuously.
+function drawFieldStrip(ctx, field, lo, hi, x0, y0, w, h, clipPath) {
+  const N = field.length;
+  const off = drawFieldStrip.off || (drawFieldStrip.off = document.createElement("canvas"));
+  if (off.width !== N) { off.width = N; off.height = 1; }
+  const octx = off.getContext("2d");
+  const img = octx.createImageData(N, 1), d = img.data;
+  const inv = 1 / Math.max(hi - lo, 1e-12);
+  for (let i = 0; i < N; i++) {
+    const k = 3 * Math.max(0, Math.min(255, Math.round((field[i] - lo) * inv * 255)));
+    d[4 * i] = CMAP[k]; d[4 * i + 1] = CMAP[k + 1]; d[4 * i + 2] = CMAP[k + 2]; d[4 * i + 3] = 255;
+  }
+  octx.putImageData(img, 0, 0);
+  ctx.save();
+  if (clipPath) { clipPath(ctx); ctx.clip(); }
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(off, 0, 0, N, 1, x0, y0, w, h);
+  ctx.restore();
+}
+
+function schlieren(rho) {
+  const N = rho.length, out = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const iL = Math.max(0, i - 1), iR = Math.min(N - 1, i + 1);
+    out[i] = Math.sqrt(Math.abs(rho[iR] - rho[iL]));   // sqrt stretch: weak waves stay visible
+  }
+  return out;
+}
+
+// ============================================================
+// Lagrangian tracers: advected with the displayed velocity while the
+// frame moves forward in small steps; frozen across seeks; re-seeded per run.
+// ============================================================
+const TRACERS = 220;
+function useTracers(sol, frame, L, runId, maxJump) {
+  const st = useRef({ run: null, t: null, frame: null, pts: [] });
+  const s = st.current;
+  if (!sol || !frame) return s.pts;
+  if (s.run !== runId) {
+    s.run = runId; s.t = frame.t; s.frame = frame; s.pts = [];
+    for (let i = 0; i < TRACERS; i++) {
+      const x = Math.random() * L;
+      s.pts.push({ x, prevX: x, y: 0.12 + Math.random() * 0.76 });
     }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.imageSmoothingEnabled = false;
+    return s.pts;
+  }
+  if (s.frame === frame) return s.pts;
+  const dt = frame.t - s.t;
+  s.frame = frame; s.t = frame.t;
+  if (dt <= 0 || dt > maxJump) { for (const p of s.pts) p.prevX = p.x; return s.pts; }
+  const N = sol.x.length, dx = L / N;
+  for (const p of s.pts) {
+    p.prevX = p.x;
+    p.x += sol.u[cellAt(p.x, dx, N)] * dt;
+    if (p.x < 0 || p.x > L) { p.x = Math.random() * L; p.prevX = p.x; p.y = 0.12 + Math.random() * 0.76; }
+  }
+  return s.pts;
+}
 
-    const W = cssW, H = cssH;
-    const padX = 12, padTop = 14, padBot = 14;
-    const tubeX = padX, tubeY = padTop;
-    const tubeW = W - 2 * padX, tubeH = H - padTop - padBot;
+// ============================================================
+// Shock tube view: field strip + tracers + probe line
+// ============================================================
+function TubeView({ sol, field, lo, hi, L, diaphragm, showDiaphragm, tracers, hoverX, onHover }) {
+  const geo = useRef(null);
+  const ref = useCanvas((ctx, W, H) => {
+    const padX = 14, padT = 12, padB = 20;
+    const tx = padX, ty = padT, tw = W - 2 * padX, th = H - padT - padB;
+    geo.current = { tx, tw };
+    ctx.fillStyle = "#101317"; ctx.fillRect(0, 0, W, H);
+    if (!sol) return;
+    drawFieldStrip(ctx, field, lo, hi, tx, ty, tw, th);
 
-    ctx.fillStyle = "#efe9d8"; ctx.fillRect(0, 0, W, H);
+    // tube-wall shading
+    const g = ctx.createLinearGradient(0, ty, 0, ty + th);
+    g.addColorStop(0, "rgba(0,0,0,0.28)"); g.addColorStop(0.5, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.28)");
+    ctx.fillStyle = g; ctx.fillRect(tx, ty, tw, th);
 
-    // Pick the scalar field to render based on mode.
-    const N = result.x.length;
-    let field, label;
-    if (mode === "pressure") { field = result.p;   label = "p"; }
-    else if (mode === "Mach")     { field = result.M;   label = "M"; }
-    else if (mode === "schlieren") {
-      // |drho/dx| with one-sided differences at the ends. Apply mild
-      // perceptual stretch (sqrt) so weak waves show up clearly.
-      const arr = new Array(N);
-      for (let i = 0; i < N; i++) {
-        const iL = Math.max(0, i - 1), iR = Math.min(N - 1, i + 1);
-        const g  = Math.abs(result.rho[iR] - result.rho[iL]);
-        arr[i] = Math.sqrt(g);
-      }
-      field = arr; label = "|drho/dx|";
-    } else { field = result.rho; label = "rho"; }
-
-    let minV = Infinity, maxV = -Infinity;
-    for (let i = 0; i < N; i++) {
-      if (field[i] < minV) minV = field[i];
-      if (field[i] > maxV) maxV = field[i];
-    }
-    const range = Math.max(maxV - minV, 1e-12);
-    const cellW = tubeW / N;
-    for (let i = 0; i < N; i++) {
-      const norm = (field[i] - minV) / range;
-      // For schlieren, invert (dense = dark gradient zones).
-      const t = mode === "schlieren" ? norm : norm;
-      const v = Math.round(247 - t * 215);
-      ctx.fillStyle = "rgb(" + v + "," + Math.max(0, v - 6) + "," + Math.max(0, v - 18) + ")";
-      ctx.fillRect(tubeX + i * cellW, tubeY, cellW + 0.6, tubeH);
-    }
-    const grad = ctx.createLinearGradient(0, tubeY, 0, tubeY + tubeH);
-    grad.addColorStop(0, "rgba(0,0,0,0.18)");
-    grad.addColorStop(0.5, "rgba(0,0,0,0.0)");
-    grad.addColorStop(1, "rgba(0,0,0,0.18)");
-    ctx.fillStyle = grad; ctx.fillRect(tubeX, tubeY, tubeW, tubeH);
-
-    if (result.particles && result.particles.length) {
+    if (tracers) {
       ctx.lineCap = "round";
-      for (const p of result.particles) {
-        const x1 = tubeX + (p.prevX / params.L) * tubeW;
-        const x2 = tubeX + (p.x     / params.L) * tubeW;
-        const y  = tubeY + p.y * tubeH;
-        const len = Math.abs(x2 - x1);
-        if (len < 0.3) {
-          ctx.fillStyle = "rgba(28,26,23,0.55)";
-          ctx.beginPath(); ctx.arc(x2, y, 0.9, 0, Math.PI * 2); ctx.fill();
+      for (const p of tracers) {
+        const x1 = tx + (p.prevX / L) * tw, x2 = tx + (p.x / L) * tw, y = ty + p.y * th;
+        if (Math.abs(x2 - x1) < 0.4) {
+          ctx.fillStyle = "rgba(20,18,16,0.55)";
+          ctx.beginPath(); ctx.arc(x2, y, 1, 0, Math.PI * 2); ctx.fill();
         } else {
-          ctx.strokeStyle = "rgba(28,26,23,0.65)";
-          ctx.lineWidth = 1.1;
+          ctx.strokeStyle = "rgba(20,18,16,0.7)"; ctx.lineWidth = 1.2;
           ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
           ctx.fillStyle = "#8b3a2f";
-          ctx.beginPath(); ctx.arc(x2, y, 1.1, 0, Math.PI * 2); ctx.fill();
+          ctx.beginPath(); ctx.arc(x2, y, 1.3, 0, Math.PI * 2); ctx.fill();
         }
       }
     }
-
-    if (info.t === 0) {
-      const dx = tubeX + (params.diaphragm / params.L) * tubeW;
-      ctx.strokeStyle = "#8b3a2f"; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(dx, tubeY - 4); ctx.lineTo(dx, tubeY + tubeH + 4); ctx.stroke();
-      ctx.setLineDash([]);
+    if (showDiaphragm) {
+      const dxp = tx + (diaphragm / L) * tw;
+      ctx.strokeStyle = "#e2724b"; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(dxp, ty - 4); ctx.lineTo(dxp, ty + th + 4); ctx.stroke(); ctx.setLineDash([]);
     }
-    ctx.strokeStyle = "#1c1a17"; ctx.lineWidth = 1.5;
-    ctx.strokeRect(tubeX + 0.5, tubeY + 0.5, tubeW - 1, tubeH - 1);
-    ctx.beginPath();
-    ctx.moveTo(tubeX, tubeY - 3); ctx.lineTo(tubeX, tubeY + tubeH + 3);
-    ctx.moveTo(tubeX + tubeW, tubeY - 3); ctx.lineTo(tubeX + tubeW, tubeY + tubeH + 3);
-    ctx.stroke();
-
-    ctx.font = "9px ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
-    ctx.fillStyle = "#5a5547";
-    ctx.textAlign = "left";  ctx.fillText("x = 0", tubeX, tubeY + tubeH + 11);
-    ctx.textAlign = "right"; ctx.fillText("x = " + params.L, tubeX + tubeW, tubeY + tubeH + 11);
-    ctx.textAlign = "left";
-    ctx.fillText(label + " ∈ [" + minV.toFixed(3) + ", " + maxV.toFixed(3) + "]", tubeX, tubeY - 4);
-  }, [result, params, info, mode]);
-  return <canvas ref={canvasRef} style={{ width: "100%", height: 120, display: "block", background: "#efe9d8" }} />;
-}
-
-// ---------- SVG line plot (optional `exact` array overlays a dashed reference) ----------
-function Plot({ x, y, label, color, exact }) {
-  const W = 360, H = 200;
-  const pad = { l: 48, r: 12, t: 24, b: 28 };
-  const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
-  let yMin = Infinity, yMax = -Infinity;
-  for (let i = 0; i < y.length; i++) { if (y[i] < yMin) yMin = y[i]; if (y[i] > yMax) yMax = y[i]; }
-  if (exact) {
-    for (let i = 0; i < exact.length; i++) {
-      if (Number.isFinite(exact[i])) {
-        if (exact[i] < yMin) yMin = exact[i];
-        if (exact[i] > yMax) yMax = exact[i];
-      }
+    if (hoverX != null) {
+      const hx = Math.round(tx + (hoverX / L) * tw) + 0.5;
+      ctx.strokeStyle = "#d7a33c"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx, ty - 5); ctx.lineTo(hx, ty + th + 5); ctx.stroke();
     }
-  }
-  const yPad = Math.max((yMax - yMin) * 0.08, 1e-6);
-  const yLo = yMin - yPad, yHi = yMax + yPad;
-  const xMin = x[0], xMax = x[x.length - 1];
-  const toX = v => pad.l + ((v - xMin) / (xMax - xMin)) * pw;
-  const toY = v => pad.t + (1 - (v - yLo) / (yHi - yLo)) * ph;
-  let path = "";
-  for (let i = 0; i < x.length; i++) {
-    path += (i === 0 ? "M" : "L") + toX(x[i]).toFixed(2) + " " + toY(y[i]).toFixed(2);
-  }
-  let exactPath = "";
-  if (exact) {
-    for (let i = 0; i < x.length; i++) {
-      exactPath += (i === 0 ? "M" : "L") + toX(x[i]).toFixed(2) + " " + toY(exact[i]).toFixed(2);
-    }
-  }
-  const fmt = v => {
-    const a = Math.abs(v);
-    if (a === 0) return "0";
-    if (a < 0.01 || a >= 1000) return v.toExponential(1);
-    return v.toFixed(a < 1 ? 3 : 2);
+    ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 1;
+    ctx.strokeRect(tx + 0.5, ty + 0.5, tw - 1, th - 1);
+    ctx.font = "10px ui-monospace, Menlo, Consolas, monospace"; ctx.fillStyle = "#7d8794"; ctx.textBaseline = "top";
+    ctx.textAlign = "left";  ctx.fillText("x = 0", tx, ty + th + 6);
+    ctx.textAlign = "right"; ctx.fillText("x = " + L, tx + tw, ty + th + 6);
+  }, [sol, field, lo, hi, L, diaphragm, showDiaphragm, tracers, hoverX]);
+
+  const onMove = e => {
+    const g = geo.current; if (!g) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const f = (e.clientX - r.left - g.tx) / g.tw;
+    onHover(f < 0 || f > 1 ? null : f * L);
   };
-  return (
-    <svg viewBox={"0 0 " + W + " " + H} style={{ display: "block", width: "100%" }}>
-      <rect x={pad.l} y={pad.t} width={pw} height={ph} fill="#f7f2e3" stroke="#1c1a17" strokeWidth="0.6" />
-      {[0.25, 0.5, 0.75].map((f, i) => (
-        <line key={"v" + i} x1={pad.l + f * pw} x2={pad.l + f * pw} y1={pad.t} y2={pad.t + ph}
-              stroke="#c8c0aa" strokeWidth="0.4" strokeDasharray="2 3" />
-      ))}
-      {[0.25, 0.5, 0.75].map((f, i) => (
-        <line key={"h" + i} x1={pad.l} x2={pad.l + pw} y1={pad.t + f * ph} y2={pad.t + f * ph}
-              stroke="#c8c0aa" strokeWidth="0.4" strokeDasharray="2 3" />
-      ))}
-      {exact && (
-        <path d={exactPath} fill="none" stroke="#5a5547" strokeWidth="1.0" strokeDasharray="3 3" strokeLinejoin="round" opacity="0.85" />
-      )}
-      <path d={path} fill="none" stroke={color} strokeWidth="1.6" strokeLinejoin="round" />
-      <text x={pad.l} y={pad.t - 8} fontFamily="ui-serif, 'Iowan Old Style', Palatino, Georgia, serif" fontSize="13" fontStyle="italic" fill="#1c1a17">{label}</text>
-      <text x={pad.l - 6} y={toY(yHi) + 4} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yHi)}</text>
-      <text x={pad.l - 6} y={toY(yLo) + 4} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{fmt(yLo)}</text>
-      <text x={toX(xMin)} y={pad.t + ph + 14} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="start">{xMin.toFixed(2)}</text>
-      <text x={toX(xMax)} y={pad.t + ph + 14} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="end">{xMax.toFixed(2)}</text>
-      <text x={pad.l + pw / 2} y={H - 4} fontFamily="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" fontSize="9" fill="#5a5547" textAnchor="middle">x</text>
-    </svg>
-  );
+  return <canvas ref={ref} className="stage-canvas" style={{ height: 132 }}
+                 onMouseMove={onMove} onMouseLeave={() => onHover(null)} />;
 }
 
-// ---------- Numeric input field ----------
-function NumField({ label, value, onChange, step }) {
-  return (
-    <label style={{ display: "flex", flexDirection: "column", gap: 3, fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", fontSize: 11, color: "var(--ink)" }}>
-      <span style={{ letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontSize: 9 }}>{label}</span>
-      <input type="number" value={value} step={step || 0.1}
-        onChange={e => onChange(parseFloat(e.target.value))}
-        style={{ fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", fontSize: 13, padding: "5px 7px",
-          background: "var(--field)", border: "1px solid var(--faint)", color: "var(--ink)",
-          borderRadius: 0, outline: "none", width: "100%" }} />
-    </label>
-  );
+// Keyboard shortcuts shared by both 1D workspaces.
+function usePlayerKeys(player, stale, run, onHelp) {
+  useShortcuts({
+    "Enter": () => run("solve"),
+    " ": () => (player && !stale ? player.toggle() : run("play")),
+    "ArrowLeft": () => player && player.stepFrame(-1),
+    "ArrowRight": () => player && player.stepFrame(1),
+    "Home": () => player && player.seek(0),
+    "End": () => player && player.seek(player.tEnd),
+    "?": onHelp
+  });
 }
 
-// ---------- Shock tube app (original) ----------
-function ShockTubeApp() {
+// ============================================================
+// Shock tube workspace
+// ============================================================
+function ShockTubeApp({ onHelp }) {
+  const [preset, setPreset]         = useState("Sod");
   const [leftState, setLeftState]   = useState(PRESETS["Sod"].L);
   const [rightState, setRightState] = useState(PRESETS["Sod"].R);
-  const [N, setN]                   = useState(300);
+  const [N, setN]                   = useState(400);
   const [Ldom, setLdom]             = useState(1.0);
   const [tEnd, setTEnd]             = useState(PRESETS["Sod"].tEnd);
   const [gamma, setGamma]           = useState(1.4);
@@ -234,783 +210,511 @@ function ShockTubeApp() {
   const [overlay, setOverlay]       = useState(true);
   const [tubeMode, setTubeMode]     = useState("density");
   const [showDerived, setShowDerived] = useState(true);
+  const [showTracers, setShowTracers] = useState(true);
+  const [hoverX, setHoverX]         = useState(null);
+  const [err, setErr]               = useState(null);
 
-  const [result, setResult] = useState(null);
-  const [info, setInfo]     = useState({ t: 0, step: 0, ms: 0 });
-  const [busy, setBusy]     = useState(false);
-  const [err, setErr]       = useState(null);
-  const [animating, setAnimating] = useState(false);
-  const stateRef     = useRef(null);
-  const particlesRef = useRef([]);
-  const rafRef       = useRef(null);
+  const [player, startPlayer] = usePlayer();
+  const solved = useRef({ key: null, params: null, run: 0 });
 
   const params = useMemo(() => ({
     N, L: Ldom, tEnd, gamma, cfl, diaphragm, leftState, rightState, bcType, flux
   }), [N, Ldom, tEnd, gamma, cfl, diaphragm, leftState, rightState, bcType, flux]);
+  const stale = !!player && solved.current.key !== JSON.stringify(params);
 
-  // ---- Exact Riemann solution at the current time, sampled on result.x ----
-  // Only meaningful with transmissive BCs over an "infinite" domain — we still
-  // compute it for reflective BCs, but it won't match once waves have reflected.
-  const exact = useMemo(() => {
-    if (!result || !overlay) return null;
-    // The analytical Riemann solution assumes an infinite domain. Skip it
-    // for reflective BCs where reflected waves invalidate the comparison.
-    if (bcType === "reflective") return null;
-    try {
-      return exactRiemann(leftState, rightState, gamma, diaphragm, info.t, result.x);
-    } catch (e) { return null; }
-  }, [result, overlay, leftState, rightState, gamma, diaphragm, info.t, bcType]);
-
-  // Derived fields for the exact overlay (Mach, T, s, a).
-  const exactDerived = useMemo(() => {
-    if (!exact) return null;
-    const n = exact.rho.length;
-    const M = new Array(n), T = new Array(n), s = new Array(n), a = new Array(n), e = new Array(n);
-    for (let i = 0; i < n; i++) {
-      const r = exact.rho[i], u = exact.u[i], p = exact.p[i];
-      const aa = Math.sqrt(gamma * Math.max(p, 1e-12) / Math.max(r, 1e-12));
-      a[i] = aa; M[i] = u / aa;
-      T[i] = p / Math.max(r, 1e-12);
-      s[i] = Math.log(Math.max(p, 1e-12) / Math.pow(Math.max(r, 1e-12), gamma));
-      e[i] = p / ((gamma - 1) * Math.max(r, 1e-12));
-    }
-    return { M, T, s, a, e };
-  }, [exact, gamma]);
-
-  const validate = () => {
-    if (leftState.rho <= 0 || rightState.rho <= 0) return "Density must be positive.";
-    if (leftState.p   <= 0 || rightState.p   <= 0) return "Pressure must be positive.";
-    if (gamma <= 1)                                 return "gamma must be greater than 1.";
-    if (cfl <= 0 || cfl > 0.9)                      return "CFL must be in (0, 0.9].";
-    if (N < 20 || N > 1500)                         return "N must be between 20 and 1500.";
-    if (tEnd <= 0)                                  return "Final time must be positive.";
-    if (diaphragm <= 0 || diaphragm >= Ldom)        return "Diaphragm must lie inside the domain.";
+  const validate = P => {
+    if (!(P.leftState.rho > 0 && P.rightState.rho > 0)) return "Density must be positive.";
+    if (!(P.leftState.p > 0 && P.rightState.p > 0))     return "Pressure must be positive.";
+    if (!(P.gamma > 1))                                  return "γ must be greater than 1.";
+    if (!(P.cfl > 0 && P.cfl <= 0.9))                    return "CFL must be in (0, 0.9].";
+    if (!(P.N >= 20 && P.N <= 2000))                     return "N must be between 20 and 2000.";
+    if (!(P.tEnd > 0))                                   return "t_end must be positive.";
+    if (!(P.L > 0))                                      return "L must be positive.";
+    if (!(P.diaphragm > 0 && P.diaphragm < P.L))         return "The diaphragm must lie inside the domain.";
     return null;
   };
 
-  const stopAnim = () => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
-    setAnimating(false);
+  const run = (mode, P) => {
+    P = P || params;
+    const e = validate(P); setErr(e); if (e) return;
+    solved.current = { key: JSON.stringify(P), params: P, run: solved.current.run + 1 };
+    startPlayer({
+      tEnd: P.tEnd, maxFrames: FRAMES_1D, playSeconds: 6,
+      init: () => initState(P),
+      advance: (s, t) => stepUntil(s, t),
+      stableDt,
+      record: recordConserved,
+      check: check1D
+    }, mode);
   };
-
-  const seedParticles = (L) => {
-    const M = 220;
-    const arr = [];
-    for (let i = 0; i < M; i++) {
-      const x = Math.random() * L;
-      arr.push({ x, prevX: x, y: 0.12 + Math.random() * 0.76 });
-    }
-    particlesRef.current = arr;
-  };
-
-  const runFinal = () => {
-    stopAnim();
-    const e = validate(); if (e) { setErr(e); return; }
-    setErr(null); setBusy(true);
-    particlesRef.current = [];
-    setTimeout(() => {
-      const t0 = performance.now();
-      let s = initState(params);
-      s = stepUntil(s, params.tEnd);
-      const ms = performance.now() - t0;
-      const ext = extract(s);
-      ext.particles = null;
-      setResult(ext);
-      setInfo({ t: s.t, step: s.step, ms });
-      setBusy(false);
-    }, 10);
-  };
-
-  const animate = () => {
-    stopAnim();
-    const e = validate(); if (e) { setErr(e); return; }
-    setErr(null);
-    const t0 = performance.now();
-    let s = initState(params);
-    stateRef.current = s;
-    seedParticles(params.L);
-
-    const ext0 = extract(s);
-    ext0.particles = particlesRef.current.map(p => ({ ...p }));
-    setResult(ext0);
-    setInfo({ t: 0, step: 0, ms: 0 });
-    setAnimating(true);
-
-    const FRAMES = 90;
-    let frame = 0;
-    const tick = () => {
-      frame++;
-      const tPrev  = stateRef.current.t;
-      const target = Math.min(params.tEnd, (frame / FRAMES) * params.tEnd);
-      stateRef.current = stepUntil(stateRef.current, target);
-      const dt = stateRef.current.t - tPrev;
-
-      for (const p of particlesRef.current) {
-        p.prevX = p.x;
-        const u = localVelocity(stateRef.current, p.x);
-        p.x += u * dt;
-        if (p.x < 0 || p.x > params.L) {
-          const nx = Math.random() * params.L;
-          p.x = nx; p.prevX = nx;
-          p.y = 0.12 + Math.random() * 0.76;
-        }
-      }
-
-      const ext = extract(stateRef.current);
-      ext.particles = particlesRef.current.map(p => ({ ...p }));
-      setResult(ext);
-      setInfo({ t: stateRef.current.t, step: stateRef.current.step, ms: performance.now() - t0 });
-
-      if (stateRef.current.t < params.tEnd) {
-        rafRef.current = requestAnimationFrame(tick);
-      } else {
-        rafRef.current = null;
-        setAnimating(false);
-      }
-    };
-    rafRef.current = requestAnimationFrame(tick);
-  };
-
-  useEffect(() => { runFinal(); /* eslint-disable-next-line */ }, []);
 
   const loadPreset = name => {
-    stopAnim();
-    const p = PRESETS[name];
-    setLeftState(p.L); setRightState(p.R); setTEnd(p.tEnd); setDiaphragm(p.diaphragm);
+    const q = PRESETS[name];
+    setPreset(name); setLeftState(q.L); setRightState(q.R); setTEnd(q.tEnd); setDiaphragm(q.diaphragm);
+    run("solve", Object.assign({}, params, { leftState: q.L, rightState: q.R, tEnd: q.tEnd, diaphragm: q.diaphragm }));
   };
 
-  const C = {
-    rho: "#8b3a2f", u: "#2d5d6e", p: "#4a5d23", e: "#6a3d5e",
-    M:   "#a4632a", T: "#5d4037", s: "#3c5a3c", a: "#7a4a82"
-  };
-  const hasStreaks = animating || (result && result.particles && result.particles.length);
+  useEffect(() => { run("solve"); /* eslint-disable-next-line */ }, []);
+  usePlayerKeys(player, stale, run, onHelp);
+
+  // ---- what to show: the frame under the playback cursor ----
+  const SP = solved.current.params;
+  const frame = player ? player.current() : null;
+  const sol = useMemo(() => {
+    if (!frame || !SP) return null;
+    return extract({ rho: frame.snap.rho, mom: frame.snap.mom, ene: frame.snap.ene,
+                     N: SP.N, dx: SP.L / SP.N, gamma: SP.gamma });
+  }, [frame, SP]);
+
+  const exact = useMemo(() => {
+    if (!sol || !overlay || SP.bcType === "reflective") return null;
+    const ex = exactRiemann(SP.leftState, SP.rightState, SP.gamma, SP.diaphragm, frame.t, sol.x);
+    if (!ex) return null;
+    const n = ex.rho.length, g = SP.gamma;
+    const d = { M: new Array(n), T: new Array(n), s: new Array(n), a: new Array(n), e: new Array(n) };
+    for (let i = 0; i < n; i++) {
+      const r = Math.max(ex.rho[i], 1e-12), p = Math.max(ex.p[i], 1e-12);
+      const a = Math.sqrt(g * p / r);
+      d.a[i] = a; d.M[i] = ex.u[i] / a; d.T[i] = p / r;
+      d.s[i] = Math.log(p / Math.pow(r, g)); d.e[i] = p / ((g - 1) * r);
+    }
+    return Object.assign(ex, d);
+  }, [sol, overlay, SP]);
+
+  const field = useMemo(() => !sol ? null
+    : tubeMode === "pressure" ? sol.p
+    : tubeMode === "Mach" ? sol.M
+    : tubeMode === "schlieren" ? schlieren(sol.rho)
+    : sol.rho, [sol, tubeMode]);
+  const [flo, fhi] = finiteRange([field]);
+  const [lo, hi] = useSmoothRange(flo, fhi, solved.current.run + tubeMode);
+  const tracers = useTracers(showTracers ? sol : null, frame, SP ? SP.L : 1, solved.current.run,
+                             SP ? 4 * SP.tEnd / FRAMES_1D : 0);
+
+  let probe = null, where = "";
+  if (sol && hoverX != null) {
+    const i = cellAt(hoverX, SP.L / SP.N, SP.N);
+    where = "x = " + fmt(sol.x[i], 3);
+    probe = [["ρ", sol.rho[i]], ["u", sol.u[i]], ["p", sol.p[i]], ["M", sol.M[i]], ["T", sol.T[i]]];
+  }
+
+  const resetKey = solved.current.run;
+  const plot = (title, key) => (
+    <PlotCard key={key} title={title} x={sol.x} y={sol[key]}
+              refY={exact ? exact[key] : null} refLabel="exact Riemann"
+              hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
+  );
+  const modeLabel = { density: "density ρ", schlieren: "schlieren |∂ρ/∂x|", pressure: "pressure p", Mach: "Mach M" }[tubeMode];
 
   return (
-    <div className="grain" style={{
-      minHeight: "100vh", background: "var(--bg)", color: "var(--ink)",
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", padding: "24px 22px 36px"
-    }}>
-      <header style={{ borderBottom: "1.5px solid var(--line)", paddingBottom: 10, marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-          <h1 style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
-            1D Euler <span style={{ fontStyle: "normal", fontWeight: 400 }}>{"· shock tube laboratory"}</span>
-          </h1>
-          <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)" }}>{flux + " · MUSCL · SSP-RK2"}</span>
-        </div>
-        <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--muted)", maxWidth: 720 }}>
-          Specify left/right gas states across the diaphragm, then run or animate. The tube view shows
-          density inside the tube (dark = dense, light = rarefied) and during animation overlays short
-          streaks tracing the local velocity field.
-        </p>
-      </header>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, alignItems: "center" }}>
-        <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)", marginRight: 4 }}>{"presets ›"}</span>
-        {Object.keys(PRESETS).map(name => (
-          <button key={name} className="btn" onClick={() => loadPreset(name)}>{name}</button>
-        ))}
-      </div>
-
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
-        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
-            left of diaphragm
-          </legend>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-            <NumField label="rho" value={leftState.rho} onChange={v => setLeftState({ ...leftState, rho: v })} />
-            <NumField label="u"   value={leftState.u}   onChange={v => setLeftState({ ...leftState, u: v })} />
-            <NumField label="p"   value={leftState.p}   onChange={v => setLeftState({ ...leftState, p: v })} />
-          </div>
-        </fieldset>
-
-        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
-            right of diaphragm
-          </legend>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-            <NumField label="rho" value={rightState.rho} onChange={v => setRightState({ ...rightState, rho: v })} />
-            <NumField label="u"   value={rightState.u}   onChange={v => setRightState({ ...rightState, u: v })} />
-            <NumField label="p"   value={rightState.p}   onChange={v => setRightState({ ...rightState, p: v })} />
-          </div>
-        </fieldset>
-
-        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
-            numerics & domain
-          </legend>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-            <NumField label="gamma"   value={gamma} onChange={setGamma} step={0.05} />
-            <NumField label="CFL"     value={cfl}   onChange={setCfl}   step={0.05} />
-            <NumField label="N cells" value={N}     onChange={v => setN(Math.round(v))} step={50} />
-            <NumField label="t end"   value={tEnd}  onChange={setTEnd}  step={0.01} />
-            <NumField label="L"       value={Ldom}  onChange={setLdom}  step={0.1} />
-            <NumField label="x_0"     value={diaphragm} onChange={setDiaphragm} step={0.05} />
-          </div>
-        </fieldset>
-      </div>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 14, padding: "10px 12px",
-                     background: "var(--elevated)", color: "var(--ink)", borderRadius: 10 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          <span>flux</span>
-          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
-            <option value="HLLC">HLLC</option>
-            <option value="HLL">HLL</option>
-            <option value="Roe">Roe</option>
-            <option value="Rusanov">Rusanov</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          <span>BCs</span>
-          <select value={bcType} onChange={e => setBcType(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
-            <option value="transmissive">transmissive</option>
-            <option value="reflective">reflective</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          <span>tube</span>
-          <select value={tubeMode} onChange={e => setTubeMode(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
-            <option value="density">density</option>
-            <option value="schlieren">schlieren</option>
-            <option value="pressure">pressure</option>
-            <option value="Mach">Mach</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
-          <input type="checkbox" checked={overlay} onChange={e => setOverlay(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
-          <span>exact overlay</span>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
-          <input type="checkbox" checked={showDerived} onChange={e => setShowDerived(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
-          <span>derived fields</span>
-        </label>
-        <button className="btn btn-primary" onClick={runFinal} disabled={busy || animating}>
-          {busy ? "computing..." : "run to t_end"}
-        </button>
-        <button className="btn" onClick={animate} disabled={busy || animating}
-                style={{ background: animating ? "var(--accent-2)" : "var(--field)", color: animating ? "var(--accent-ink)" : "var(--ink)" }}>
-          {animating ? "animating..." : "animate flow"}
-        </button>
-        {animating && <button className="btn" onClick={stopAnim} style={{ background: "var(--field)", color: "var(--ink)" }}>stop</button>}
-
-        <div style={{ marginLeft: "auto", fontSize: 11, display: "flex", gap: 18, color: "var(--ink)" }}>
-          <span><span style={{ color: "var(--muted)" }}>t = </span>{info.t.toFixed(4)}</span>
-          <span><span style={{ color: "var(--muted)" }}>steps = </span>{info.step}</span>
-          <span><span style={{ color: "var(--muted)" }}>wall = </span>{info.ms.toFixed(0)} ms</span>
-        </div>
-      </div>
-
-      {err && (
-        <div style={{ padding: "8px 12px", border: "1px solid var(--danger)", background: "var(--danger-bg)", color: "var(--accent)",
-                        fontSize: 11, marginBottom: 12 }}>
-          ! {err}
-        </div>
-      )}
-
-      <div style={{ marginBottom: 14 }}>
-        <div className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, color: "var(--ink)", marginBottom: 4 }}>
-          inside the tube {"· " + (
-            tubeMode === "schlieren" ? "schlieren (|drho/dx|)" :
-            tubeMode === "pressure" ? "pressure field" :
-            tubeMode === "Mach" ? "Mach field" : "density field"
-          )}{hasStreaks ? " + velocity streaks" : ""}
-        </div>
-        <div style={{ border: "1px solid var(--faint)" }}>
-          {result && <TubeView result={result} params={params} info={info} mode={tubeMode} />}
-        </div>
-      </div>
-
-      {result && (
-        <div style={{ background: "var(--elevated)", padding: 14, borderRadius: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 14 }}>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.rho} label="density rho(x)" color={C.rho}
-                    exact={exact ? exact.rho : null} />
+    <div className="app">
+      <TopBar active="shocktube" scheme={flux + " · MUSCL–minmod · SSP-RK2"} onHelp={onHelp} />
+      <div className="workspace">
+        <aside className="rail">
+          <p className="rail-intro">
+            Burst a diaphragm between two gas states and watch the rarefaction, contact and shock separate.
+          </p>
+          <Section title="Preset">
+            <div className="presets">
+              {Object.keys(PRESETS).map(name => (
+                <button key={name} className={"preset" + (preset === name ? " on" : "")}
+                        onClick={() => loadPreset(name)}>{name}</button>
+              ))}
             </div>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.u}   label="velocity u(x)"  color={C.u}
-                    exact={exact ? exact.u : null} />
+          </Section>
+          <Section title="Left state">
+            <div className="grid-3">
+              <NumField label="ρ" value={leftState.rho} onChange={v => setLeftState({ ...leftState, rho: v })} />
+              <NumField label="u" value={leftState.u}   onChange={v => setLeftState({ ...leftState, u: v })} />
+              <NumField label="p" value={leftState.p}   onChange={v => setLeftState({ ...leftState, p: v })} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.p}   label="pressure p(x)"  color={C.p}
-                    exact={exact ? exact.p : null} />
+          </Section>
+          <Section title="Right state">
+            <div className="grid-3">
+              <NumField label="ρ" value={rightState.rho} onChange={v => setRightState({ ...rightState, rho: v })} />
+              <NumField label="u" value={rightState.u}   onChange={v => setRightState({ ...rightState, u: v })} />
+              <NumField label="p" value={rightState.p}   onChange={v => setRightState({ ...rightState, p: v })} />
             </div>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.e}   label="internal energy e(x)" color={C.e}
-                    exact={exactDerived ? exactDerived.e : null} />
+          </Section>
+          <Section title="Numerics">
+            <div className="grid-2">
+              <SelectField label="Riemann flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />
+              <SelectField label="Boundaries" value={bcType} onChange={setBcType} options={["transmissive", "reflective"]} />
             </div>
-          </div>
-          {showDerived && (
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 14, marginTop: 14 }}>
-              <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-                <Plot x={result.x} y={result.M} label="Mach M(x)" color={C.M}
-                      exact={exactDerived ? exactDerived.M : null} />
-              </div>
-              <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-                <Plot x={result.x} y={result.T} label="temperature T(x)" color={C.T}
-                      exact={exactDerived ? exactDerived.T : null} />
-              </div>
-              <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-                <Plot x={result.x} y={result.s} label="entropy s(x)" color={C.s}
-                      exact={exactDerived ? exactDerived.s : null} />
-              </div>
-              <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-                <Plot x={result.x} y={result.a} label="sound speed a(x)" color={C.a}
-                      exact={exactDerived ? exactDerived.a : null} />
-              </div>
+            <div className="grid-3">
+              <NumField label="N cells" value={N} onChange={v => setN(Math.round(v))} step={50} />
+              <NumField label="CFL" value={cfl} onChange={setCfl} step={0.05} />
+              <NumField label="t end" value={tEnd} onChange={setTEnd} step={0.01} />
+              <NumField label="γ" value={gamma} onChange={setGamma} step={0.05} />
+              <NumField label="L" value={Ldom} onChange={setLdom} step={0.1} />
+              <NumField label="x₀" value={diaphragm} onChange={setDiaphragm} step={0.05} />
+            </div>
+            {cfl > CFL_SAFE && <div className="note" style={{ color: "var(--accent-2)" }}>
+              CFL above {CFL_SAFE} is past the usual MUSCL + RK2 margin; Sod diverges near 0.58.</div>}
+          </Section>
+          <Section title="Display">
+            <Segmented label="Tube field" value={tubeMode} onChange={setTubeMode}
+                       options={[{ value: "density", label: "ρ" }, { value: "schlieren", label: "schlieren" },
+                                 { value: "pressure", label: "p" }, { value: "Mach", label: "M" }]} />
+            <Toggle checked={overlay} onChange={setOverlay} label="exact Riemann overlay" />
+            <Toggle checked={showDerived} onChange={setShowDerived} label="derived fields (M, T, s, a)" />
+            <Toggle checked={showTracers} onChange={setShowTracers} label="tracer particles" />
+            {bcType === "reflective" && overlay &&
+              <div className="note">The exact solution assumes an infinite tube, so it is hidden with reflective walls.</div>}
+          </Section>
+        </aside>
+
+        <main className="main">
+          <Transport player={player} stale={stale}
+                     onSolve={() => run("solve")} onPlay={() => run("play")}
+                     info={frame ? frame.step + " steps · " + Math.round(player.computeMs) + " ms" : null} />
+          {stale && <div className="note">Parameters changed — press <b>Solve</b> (Enter) to recompute.</div>}
+          {err && <div className="alert">{err}</div>}
+          {player && player.error && <div className="alert">{player.error} Try HLLC / HLL / Rusanov, a lower CFL, or a finer grid.</div>}
+
+          <section className="stage">
+            <div className="stage-head">
+              <span className="stage-title">Inside the tube</span>
+              <span className="muted">{modeLabel}{showTracers ? " · tracers" : ""}</span>
+            </div>
+            <div className="stage-body">
+              <TubeView sol={sol} field={field} lo={lo} hi={hi} L={SP ? SP.L : 1}
+                        diaphragm={SP ? SP.diaphragm : 0.5} showDiaphragm={!!frame && frame.t === 0}
+                        tracers={showTracers ? tracers : null} hoverX={hoverX} onHover={setHoverX} />
+            </div>
+            <div className="stage-foot">
+              <Colorbar lo={lo} hi={hi} label={modeLabel} />
+              <Probe items={probe} where={where} />
+            </div>
+          </section>
+
+          {sol && (
+            <div className="plots">
+              {plot("density ρ", "rho")}
+              {plot("velocity u", "u")}
+              {plot("pressure p", "p")}
+              {plot("internal energy e", "e")}
+              {showDerived && plot("Mach number M", "M")}
+              {showDerived && plot("temperature T = p/ρ", "T")}
+              {showDerived && plot("entropy s = ln(p/ρ^γ)", "s")}
+              {showDerived && plot("sound speed a", "a")}
             </div>
           )}
-        </div>
-      )}
-
-      <footer style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid var(--line)", fontSize: 10, color: "var(--muted)",
-                        display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-        <span>dU/dt + dF(U)/dx = 0  {"·"}  U = [rho, rho*u, E]  {"·"}  E = p/(gamma-1) + (1/2)*rho*u^2</span>
-        <span className="smallcaps">finite volume {"·"} 1D {"·"} ideal gas</span>
-      </footer>
+          <footer className="note">∂U/∂t + ∂F(U)/∂x = 0 · U = [ρ, ρu, E] · E = p/(γ−1) + ½ρu² · finite volume, ideal gas</footer>
+        </main>
+      </div>
     </div>
   );
 }
 
-// ---------- Nozzle cross-section canvas ----------
-function NozzleView({ result, nozzleState, mode }) {
-  const canvasRef = useRef(null);
-  useEffect(() => {
-    const cv = canvasRef.current;
-    if (!cv || !result || !nozzleState) return;
-    const ctx = cv.getContext("2d");
-    const dpr = window.devicePixelRatio || 1;
-    const cssW = cv.clientWidth, cssH = cv.clientHeight;
-    if (cv.width !== cssW * dpr || cv.height !== cssH * dpr) {
-      cv.width = cssW * dpr; cv.height = cssH * dpr;
-    }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const W = cssW, H = cssH;
-    const padX = 14, padY = 18;
-    const plotW = W - 2 * padX, plotH = H - 2 * padY;
-    const { N, L, AR, type } = nozzleState;
-
-    ctx.fillStyle = "#efe9d8"; ctx.fillRect(0, 0, W, H);
-
-    // Pick scalar field
-    let field, label;
-    if (mode === "pressure")    { field = result.p;   label = "p"; }
-    else if (mode === "temp")   { field = result.T;   label = "T"; }
-    else if (mode === "Mach")   { field = result.M;   label = "M"; }
-    else                        { field = result.rho; label = "rho"; }
-
-    let minV = Infinity, maxV = -Infinity;
-    const Nn = result.x.length;
-    for (let i = 0; i < Nn; i++) {
-      if (field[i] < minV) minV = field[i];
-      if (field[i] > maxV) maxV = field[i];
-    }
-    const range = Math.max(maxV - minV, 1e-12);
-
-    // Draw filled nozzle interior column by column
-    for (let i = 0; i < Nn; i++) {
-      const xc = result.x[i];
-      const Ai = nozzleArea(xc, L, AR, type);
-      const halfH = (Ai / AR) * (plotH / 2);
-      const cx = padX + (i / Nn) * plotW;
-      const cw = plotW / Nn + 0.6;
-      const cy_mid = padY + plotH / 2;
-      const norm = (field[i] - minV) / range;
-      const v = Math.round(247 - norm * 215);
-      ctx.fillStyle = "rgb(" + v + "," + Math.max(0, v - 6) + "," + Math.max(0, v - 18) + ")";
-      ctx.fillRect(cx, cy_mid - halfH, cw, 2 * halfH);
-    }
-
-    // Shading overlay (top/bottom fade)
-    const grad = ctx.createLinearGradient(0, padY, 0, padY + plotH);
-    grad.addColorStop(0,   "rgba(0,0,0,0.15)");
-    grad.addColorStop(0.5, "rgba(0,0,0,0.0)");
-    grad.addColorStop(1,   "rgba(0,0,0,0.15)");
-    ctx.fillStyle = grad;
-    // Clip fill to nozzle interior
-    ctx.save();
-    ctx.beginPath();
-    for (let i = 0; i <= Nn; i++) {
-      const xc = i < Nn ? result.x[i] : L;
-      const Ai = nozzleArea(Math.min(xc, L), L, AR, type);
-      const halfH = (Ai / AR) * (plotH / 2);
-      const cx = padX + (i / Nn) * plotW;
-      if (i === 0) ctx.moveTo(cx, padY + plotH / 2 - halfH);
-      else         ctx.lineTo(cx, padY + plotH / 2 - halfH);
-    }
-    for (let i = Nn; i >= 0; i--) {
-      const xc = i < Nn ? result.x[i] : L;
-      const Ai = nozzleArea(Math.min(xc, L), L, AR, type);
-      const halfH = (Ai / AR) * (plotH / 2);
-      const cx = padX + (i / Nn) * plotW;
-      ctx.lineTo(cx, padY + plotH / 2 + halfH);
-    }
-    ctx.closePath(); ctx.clip();
-    ctx.fillRect(0, 0, W, H);
+// ============================================================
+// Nozzle view: duct silhouette filled with the field
+// ============================================================
+function NozzleView({ sol, field, lo, hi, geom, hoverX, onHover }) {
+  const geo = useRef(null);
+  const ref = useCanvas((ctx, W, H) => {
+    ctx.fillStyle = "#101317"; ctx.fillRect(0, 0, W, H);
+    if (!sol || !geom) return;
+    const { L, AR, type } = geom;
+    const padX = 16, padY = 16, padB = 22;
+    const pw = W - 2 * padX, ph = H - padY - padB, cy = padY + ph / 2;
+    geo.current = { padX, pw, L };
+    const halfAt = x => (nozzleArea(Math.max(0, Math.min(L, x)), L, AR, type) / AR) * (ph / 2);
+    const SAMPLES = 160;
+    const outline = c => {
+      c.beginPath();
+      for (let k = 0; k <= SAMPLES; k++) { const x = (k / SAMPLES) * L; c.lineTo(padX + (x / L) * pw, cy - halfAt(x)); }
+      for (let k = SAMPLES; k >= 0; k--) { const x = (k / SAMPLES) * L; c.lineTo(padX + (x / L) * pw, cy + halfAt(x)); }
+      c.closePath();
+    };
+    drawFieldStrip(ctx, field, lo, hi, padX, padY, pw, ph, outline);
+    ctx.save(); outline(ctx); ctx.clip();
+    const g = ctx.createLinearGradient(0, padY, 0, padY + ph);
+    g.addColorStop(0, "rgba(0,0,0,0.25)"); g.addColorStop(0.5, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.25)");
+    ctx.fillStyle = g; ctx.fillRect(padX, padY, pw, ph);
     ctx.restore();
 
-    // Nozzle walls
-    ctx.lineWidth = 2; ctx.strokeStyle = "#1c1a17";
+    ctx.strokeStyle = "#c8ccd2"; ctx.lineWidth = 2;
     for (const sign of [-1, 1]) {
       ctx.beginPath();
-      for (let i = 0; i <= Nn; i++) {
-        const xc = i < Nn ? result.x[i] : L;
-        const Ai = nozzleArea(Math.min(xc, L), L, AR, type);
-        const halfH = (Ai / AR) * (plotH / 2);
-        const cx = padX + (i / Nn) * plotW;
-        const cy = padY + plotH / 2 + sign * halfH;
-        i === 0 ? ctx.moveTo(cx, cy) : ctx.lineTo(cx, cy);
-      }
+      for (let k = 0; k <= SAMPLES; k++) { const x = (k / SAMPLES) * L; ctx.lineTo(padX + (x / L) * pw, cy + sign * halfAt(x)); }
       ctx.stroke();
     }
-    // End caps
-    ctx.lineWidth = 1.5;
-    for (const xi of [0, L]) {
-      const Ai = nozzleArea(xi === 0 ? 0 : L, L, AR, type);
-      const halfH = (Ai / AR) * (plotH / 2);
-      const cx = xi === 0 ? padX : padX + plotW;
-      ctx.beginPath();
-      ctx.moveTo(cx, padY + plotH / 2 - halfH);
-      ctx.lineTo(cx, padY + plotH / 2 + halfH);
-      ctx.stroke();
+    if (hoverX != null) {
+      const hx = Math.round(padX + (hoverX / L) * pw) + 0.5, hh = halfAt(hoverX);
+      ctx.strokeStyle = "#d7a33c"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx, cy - hh - 6); ctx.lineTo(hx, cy + hh + 6); ctx.stroke();
     }
-
-    // Labels
-    ctx.font = "9px ui-monospace, 'SF Mono', Menlo, Consolas, monospace"; ctx.fillStyle = "#5a5547";
-    ctx.textAlign = "left";
-    ctx.fillText(label + " ∈ [" + minV.toFixed(3) + ", " + maxV.toFixed(3) + "]", padX, padY - 5);
+    ctx.font = "10px ui-monospace, Menlo, Consolas, monospace"; ctx.fillStyle = "#7d8794"; ctx.textBaseline = "top";
+    const yLab = padY + ph + 6;
+    ctx.textAlign = "left";   ctx.fillText("inlet · reservoir", padX, yLab);
+    ctx.textAlign = "right";  ctx.fillText("exit · p_b", padX + pw, yLab);
     ctx.textAlign = "center";
-    ctx.fillText("throat", padX + (type === "convergent" ? plotW : type === "divergent" ? 0 : plotW / 2), padY + plotH + 12);
-    ctx.textAlign = "left";  ctx.fillText("inlet", padX, padY + plotH + 12);
-    ctx.textAlign = "right"; ctx.fillText("exit", padX + plotW, padY + plotH + 12);
-  }, [result, nozzleState, mode]);
+    if (type === "CD") ctx.fillText("throat", padX + pw / 2, yLab);
+  }, [sol, field, lo, hi, geom, hoverX]);
 
-  return <canvas ref={canvasRef} style={{ width: "100%", height: 160, display: "block", background: "#efe9d8" }} />;
+  const onMove = e => {
+    const g = geo.current; if (!g) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const f = (e.clientX - r.left - g.padX) / g.pw;
+    onHover(f < 0 || f > 1 ? null : f * g.L);
+  };
+  return <canvas ref={ref} className="stage-canvas" style={{ height: 190 }}
+                 onMouseMove={onMove} onMouseLeave={() => onHover(null)} />;
 }
 
-// ---------- Nozzle app ----------
-function NozzleApp() {
-  const [preset, setPreset]       = useState("Choked CD");
-  const [nozzType, setNozzType]   = useState("CD");
-  const [AR, setAR]               = useState(2.0);
-  const [p0, setP0]               = useState(1.0);
-  const [T0, setT0]               = useState(1.0);
-  const [pb, setPb]               = useState(0.93);
-  const [N, setN]                 = useState(300);
-  const [Ldom, setLdom]           = useState(1.0);
-  const [gamma, setGamma]         = useState(1.4);
-  const [cfl, setCfl]             = useState(0.4);
-  const [tEnd, setTEnd]           = useState(8.0);
-  const [flux, setFlux]           = useState("HLLC");
-  const [tubeMode, setTubeMode]   = useState("Mach");
-  const [branch, setBranch]       = useState("subsonic");
-  const [showIso, setShowIso]     = useState(true);
+// Steady-state residual for each recorded frame: mean |Δρ| / Δt between frames.
+// Cached per run so it only processes frames it hasn't seen yet.
+function useResiduals(player, runId) {
+  const st = useRef({ run: null, t: [], r: [] });
+  const s = st.current;
+  if (s.run !== runId) { s.run = runId; s.t = []; s.r = []; }
+  if (player) {
+    const F = player.frames;
+    for (let k = s.t.length + 1; k < F.length; k++) {
+      const a = F[k - 1].snap.rho, b = F[k].snap.rho, dt = F[k].t - F[k - 1].t;
+      let sum = 0;
+      for (let i = 2; i < a.length - 2; i++) sum += Math.abs(b[i] - a[i]);
+      s.t.push(F[k].t); s.r.push(sum / (a.length - 4) / Math.max(dt, 1e-300));
+    }
+  }
+  return s;
+}
 
-  const [result, setResult]           = useState(null);
-  const [isoResult, setIsoResult]     = useState(null);
-  const [nozzleState, setNozzleState] = useState(null);
-  const [info, setInfo]               = useState({ t: 0, step: 0, ms: 0 });
-  const [busy, setBusy]               = useState(false);
-  const [err, setErr]                 = useState(null);
-  const [animating, setAnimating]     = useState(false);
-  const stateRef = useRef(null);
-  const rafRef   = useRef(null);
+// ============================================================
+// Nozzle workspace
+// ============================================================
+function NozzleApp({ onHelp }) {
+  const P0 = NOZZLE_PRESETS["Choked CD"];
+  const [preset, setPreset]     = useState("Choked CD");
+  const [nozzType, setNozzType] = useState(P0.type);
+  const [AR, setAR]             = useState(P0.AR);
+  const [p0, setP0]             = useState(P0.p0);
+  const [T0, setT0]             = useState(P0.T0);
+  const [pb, setPb]             = useState(P0.pb);
+  const [N, setN]               = useState(P0.N);
+  const [Ldom, setLdom]         = useState(P0.L);
+  const [gamma, setGamma]       = useState(P0.gamma);
+  const [cfl, setCfl]           = useState(P0.cfl);
+  const [tEnd, setTEnd]         = useState(P0.tEnd);
+  const [flux, setFlux]         = useState("HLLC");
+  const [viewMode, setViewMode] = useState("Mach");
+  const [branch, setBranch]     = useState(P0.branch);
+  const [showIso, setShowIso]   = useState(true);
+  const [hoverX, setHoverX]     = useState(null);
+  const [err, setErr]           = useState(null);
 
-  const stopAnim = () => {
-    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null; setAnimating(false);
+  const [player, startPlayer] = usePlayer();
+  const solved = useRef({ key: null, params: null, meta: null, run: 0 });
+
+  const params = useMemo(() => ({ type: nozzType, AR, p0, T0, pb, N, L: Ldom, gamma, cfl, tEnd, flux }),
+                         [nozzType, AR, p0, T0, pb, N, Ldom, gamma, cfl, tEnd, flux]);
+  const stale = !!player && solved.current.key !== JSON.stringify(params);
+
+  const validate = P => {
+    if (!(P.AR >= 1))                    return "Area ratio must be ≥ 1.";
+    if (!(P.p0 > 0 && P.T0 > 0))         return "Reservoir p₀ and T₀ must be positive.";
+    if (!(P.pb > 0 && P.pb <= P.p0))     return "Back pressure must be in (0, p₀].";
+    if (!(P.gamma > 1))                  return "γ must be greater than 1.";
+    if (!(P.cfl > 0 && P.cfl <= 0.9))    return "CFL must be in (0, 0.9].";
+    if (!(P.N >= 20 && P.N <= 2000))     return "N must be between 20 and 2000.";
+    if (!(P.tEnd > 0 && P.L > 0))        return "t_end and L must be positive.";
+    return null;
   };
 
-  const getParams = () => ({
-    type: nozzType, AR, p0, T0, pb, N, L: Ldom, gamma, cfl, tEnd, flux
-  });
+  const run = (mode, P) => {
+    P = P || params;
+    const e = validate(P); setErr(e); if (e) return;
+    const rec = solved.current = { key: JSON.stringify(P), params: P, meta: null, run: solved.current.run + 1 };
+    startPlayer({
+      tEnd: P.tEnd, maxFrames: 300, playSeconds: 8,
+      init: () => { const s = initNozzleState(P); rec.meta = s; return s; },
+      advance: (s, t) => nozzleStepUntil(s, t),
+      stableDt,
+      record: recordConserved,
+      check: check1D
+    }, mode);
+  };
 
   const loadPreset = name => {
-    stopAnim();
     const q = NOZZLE_PRESETS[name];
-    setPreset(name); setNozzType(q.type); setAR(q.AR); setP0(q.p0);
-    setT0(q.T0); setPb(q.pb); setN(q.N); setLdom(q.L);
-    setGamma(q.gamma); setCfl(q.cfl); setTEnd(q.tEnd); setBranch(q.branch);
+    setPreset(name); setNozzType(q.type); setAR(q.AR); setP0(q.p0); setT0(q.T0); setPb(q.pb);
+    setN(q.N); setLdom(q.L); setGamma(q.gamma); setCfl(q.cfl); setTEnd(q.tEnd); setBranch(q.branch);
+    run("solve", { type: q.type, AR: q.AR, p0: q.p0, T0: q.T0, pb: q.pb, N: q.N, L: q.L,
+                   gamma: q.gamma, cfl: q.cfl, tEnd: q.tEnd, flux });
   };
 
-  const runFinal = (overrideParams) => {
-    stopAnim();
-    setErr(null); setBusy(true);
-    const p = overrideParams || getParams();
-    const br = branch;
-    setTimeout(() => {
-      try {
-        const t0 = performance.now();
-        let s = initNozzleState(p);
-        s = nozzleStepUntil(s, p.tEnd);
-        const ms = performance.now() - t0;
-        const ext = extractNozzle(s);
-        const iso = showIso ? isentropicSolution(s, br) : null;
-        setResult(ext); setNozzleState(s); setIsoResult(iso);
-        setInfo({ t: s.t, step: s.step, ms });
-        setBusy(false);
-      } catch (e) { setErr("Solver error: " + e.message); setBusy(false); }
-    }, 10);
-  };
+  useEffect(() => { run("solve"); /* eslint-disable-next-line */ }, []);
+  usePlayerKeys(player, stale, run, onHelp);
 
-  const animate = () => {
-    stopAnim(); setErr(null);
-    const p = getParams(); const br = branch;
-    const t0 = performance.now();
-    let s = initNozzleState(p);
-    stateRef.current = s;
-    const ext0 = extractNozzle(s);
-    const iso = showIso ? isentropicSolution(s, br) : null;
-    setResult(ext0); setNozzleState(s); setIsoResult(iso);
-    setInfo({ t: 0, step: 0, ms: 0 }); setAnimating(true);
+  const meta = solved.current.meta;
+  const frame = player ? player.current() : null;
+  const sol = useMemo(() => {
+    if (!frame || !meta) return null;
+    const s = extractNozzle(Object.assign({}, meta, { rho: frame.snap.rho, mom: frame.snap.mom, ene: frame.snap.ene }));
+    s.mdot = s.x.map((_, i) => s.rho[i] * s.u[i] * s.A[i]);
+    return s;
+  }, [frame, meta]);
+  const iso = useMemo(() => (meta && showIso ? isentropicSolution(meta, branch) : null), [meta, showIso, branch]);
+  const res = useResiduals(player, solved.current.run);
 
-    const FRAMES = 90; let frame = 0;
-    const tick = () => {
-      frame++;
-      const target = Math.min(p.tEnd, (frame / FRAMES) * p.tEnd);
-      stateRef.current = nozzleStepUntil(stateRef.current, target);
-      const ext = extractNozzle(stateRef.current);
-      setResult(ext); setNozzleState(stateRef.current);
-      setInfo({ t: stateRef.current.t, step: stateRef.current.step, ms: performance.now() - t0 });
-      if (stateRef.current.t < p.tEnd) {
-        rafRef.current = requestAnimationFrame(tick);
-      } else { rafRef.current = null; setAnimating(false); }
-    };
-    rafRef.current = requestAnimationFrame(tick);
-  };
+  const field = !sol ? null : viewMode === "pressure" ? sol.p : viewMode === "temp" ? sol.T
+              : viewMode === "density" ? sol.rho : sol.M;
+  const [flo, fhi] = finiteRange([field]);
+  const [lo, hi] = useSmoothRange(flo, fhi, solved.current.run + viewMode);
 
-  // Load default preset on mount
-  useEffect(() => { loadPreset("Choked CD"); }, []);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { runFinal(NOZZLE_PRESETS["Choked CD"]); }, []);
+  let probe = null, where = "";
+  if (sol && hoverX != null) {
+    const i = cellAt(hoverX, meta.dx, meta.N);
+    where = "x = " + fmt(sol.x[i], 3) + " · A = " + fmt(sol.A[i], 3);
+    probe = [["M", sol.M[i]], ["p", sol.p[i]], ["T", sol.T[i]], ["ρ", sol.rho[i]], ["pₜ", sol.pt[i]]];
+  }
 
-  const C = { M: "#a4632a", p: "#4a5d23", T: "#5d4037", rho: "#8b3a2f", pt: "#2d5d6e" };
+  const pStar = Math.pow(2 / (gamma + 1), gamma / (gamma - 1));
+  const resetKey = solved.current.run;
+  const plot = (title, key, withIso) => (
+    <PlotCard key={key} title={title} x={sol.x} y={sol[key]}
+              refY={withIso && iso ? iso[key] : null} refLabel="isentropic"
+              hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
+  );
+  const modeLabel = { Mach: "Mach M", pressure: "pressure p", temp: "temperature T", density: "density ρ" }[viewMode];
+  const last = sol ? sol.x.length - 1 : 0;
 
   return (
-    <div className="grain" style={{ minHeight: "100vh", background: "var(--bg)", color: "var(--ink)",
-      fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace", padding: "24px 22px 36px" }}>
-      <header style={{ borderBottom: "1.5px solid var(--line)", paddingBottom: 10, marginBottom: 16 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-          <h1 style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontWeight: 600, fontStyle: "italic", fontSize: 34, lineHeight: 1, margin: 0 }}>
-            Quasi-1D Nozzle <span style={{ fontStyle: "normal", fontWeight: 400 }}>{"· Euler flow"}</span>
-          </h1>
-          <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)" }}>{flux + " · MUSCL · SSP-RK2"}</span>
-        </div>
-        <p style={{ margin: "6px 0 0", fontSize: 11, color: "var(--muted)", maxWidth: 720 }}>
-          Variable-area duct with isentropic reservoir inlet and back-pressure exit.
-          Switch nozzle type to compare convergent, divergent, and CD (converging-diverging) flows.
-          The dashed overlay shows the analytical isentropic solution for reference.
-        </p>
-      </header>
+    <div className="app">
+      <TopBar active="nozzle" scheme={flux + " · MUSCL–minmod · SSP-RK2"} onHelp={onHelp} />
+      <div className="workspace">
+        <aside className="rail">
+          <p className="rail-intro">
+            A duct fed by a reservoir (p₀, T₀) and exhausting to back pressure p_b. Lower p_b to choke the
+            throat, push a shock into the divergent section, then blow it out.
+          </p>
+          <Section title="Preset">
+            <div className="presets">
+              {Object.keys(NOZZLE_PRESETS).map(name => (
+                <button key={name} className={"preset" + (preset === name ? " on" : "")}
+                        onClick={() => loadPreset(name)}>{name}</button>
+              ))}
+            </div>
+          </Section>
+          <Section title="Geometry">
+            <div className="grid-2">
+              <SelectField label="Type" value={nozzType} onChange={setNozzType}
+                           options={[{ value: "CD", label: "conv.–div." }, { value: "convergent", label: "convergent" },
+                                     { value: "divergent", label: "divergent" }]} />
+              <NumField label="A_max / A_throat" value={AR} onChange={setAR} step={0.1} />
+            </div>
+          </Section>
+          <Section title="Boundary conditions" aside={"p_b/p₀ " + (pb / Math.max(p0, 1e-9)).toFixed(3)}>
+            <div className="grid-3">
+              <NumField label="p₀ inlet" value={p0} onChange={setP0} step={0.05} />
+              <NumField label="T₀ inlet" value={T0} onChange={setT0} step={0.05} />
+              <NumField label="p_b exit" value={pb} onChange={setPb} step={0.01} />
+            </div>
+            <div className="note">Sonic throat at p*/p₀ = {pStar.toFixed(4)}.</div>
+          </Section>
+          <Section title="Numerics">
+            <SelectField label="Riemann flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />
+            <div className="grid-3">
+              <NumField label="N cells" value={N} onChange={v => setN(Math.round(v))} step={50} />
+              <NumField label="CFL" value={cfl} onChange={setCfl} step={0.05} />
+              <NumField label="t end" value={tEnd} onChange={setTEnd} step={1} />
+              <NumField label="γ" value={gamma} onChange={setGamma} step={0.05} />
+              <NumField label="L" value={Ldom} onChange={setLdom} step={0.1} />
+            </div>
+            {cfl > CFL_SAFE && <div className="note" style={{ color: "var(--accent-2)" }}>
+              CFL above {CFL_SAFE} is past the usual MUSCL + RK2 margin.</div>}
+          </Section>
+          <Section title="Display">
+            <Segmented label="Duct field" value={viewMode} onChange={setViewMode}
+                       options={[{ value: "Mach", label: "M" }, { value: "pressure", label: "p" },
+                                 { value: "temp", label: "T" }, { value: "density", label: "ρ" }]} />
+            <Toggle checked={showIso} onChange={setShowIso} label="isentropic overlay" />
+            <SelectField label="Overlay branch (divergent part)" value={branch} onChange={setBranch}
+                         options={["subsonic", "supersonic"]} />
+            <div className="note">The overlay assumes a sonic throat, so it applies to choked, shock-free flow.</div>
+          </Section>
+        </aside>
 
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 14, alignItems: "center" }}>
-        <span className="smallcaps" style={{ fontSize: 10, color: "var(--muted)", marginRight: 4 }}>{"presets ›"}</span>
-        {Object.keys(NOZZLE_PRESETS).map(name => (
-          <button key={name} className="btn"
-            style={{ background: preset === name ? "var(--accent)" : "var(--field)",
-                     color: preset === name ? "var(--accent-ink)" : "var(--ink)",
-                     borderColor: preset === name ? "var(--accent)" : "var(--faint)" }}
-            onClick={() => { loadPreset(name); }}>
-            {name}
-          </button>
-        ))}
-      </div>
+        <main className="main">
+          <Transport player={player} stale={stale}
+                     onSolve={() => run("solve")} onPlay={() => run("play")}
+                     info={frame ? frame.step + " steps · " + Math.round(player.computeMs) + " ms" : null} />
+          {stale && <div className="note">Parameters changed — press <b>Solve</b> (Enter) to recompute.</div>}
+          {err && <div className="alert">{err}</div>}
+          {player && player.error && <div className="alert">{player.error} Try HLLC / HLL / Rusanov or a lower CFL.</div>}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14, marginBottom: 16 }}>
-        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
-            nozzle geometry
-          </legend>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            <label style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11, color: "var(--ink)" }}>
-              <span style={{ letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", fontSize: 9 }}>type</span>
-              <select value={nozzType} onChange={e => setNozzType(e.target.value)}>
-                <option value="convergent">Convergent</option>
-                <option value="divergent">Divergent</option>
-                <option value="CD">Converging-Diverging (CD)</option>
-              </select>
-            </label>
-            <NumField label={"AR  (Aₘₐₓ / A⨀)"} value={AR} onChange={setAR} step={0.1} />
-          </div>
-        </fieldset>
+          <section className="stage">
+            <div className="stage-head">
+              <span className="stage-title">{nozzType === "CD" ? "Converging–diverging nozzle" : nozzType + " nozzle"}</span>
+              <span className="muted">{modeLabel}</span>
+              {sol && <span className="muted" style={{ marginLeft: "auto" }}>
+                exit M {fmt(sol.M[last], 3)} · ṁ {fmt(sol.mdot[last], 4)}</span>}
+            </div>
+            <div className="stage-body">
+              <NozzleView sol={sol} field={field} lo={lo} hi={hi} geom={meta} hoverX={hoverX} onHover={setHoverX} />
+            </div>
+            <div className="stage-foot">
+              <Colorbar lo={lo} hi={hi} label={modeLabel} />
+              <Probe items={probe} where={where} />
+            </div>
+          </section>
 
-        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
-            boundary conditions
-          </legend>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-            <NumField label="p₀ inlet"  value={p0} onChange={setP0} step={0.05} />
-            <NumField label="T₀ inlet"  value={T0} onChange={setT0} step={0.05} />
-            <NumField label="pᵇ exit"   value={pb} onChange={setPb} step={0.01} />
-          </div>
-          <div style={{ marginTop: 8, fontSize: 10, color: "var(--muted)" }}>
-            {"pᵇ / p₀ = " + (pb / Math.max(p0, 1e-9)).toFixed(4)}
-            {" · p*/p₀ = " + Math.pow(2 / (gamma + 1), gamma / (gamma - 1)).toFixed(4)}
-          </div>
-        </fieldset>
-
-        <fieldset style={{ border: "1px solid var(--faint)", padding: "10px 12px 12px", margin: 0 }}>
-          <legend className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, padding: "0 6px" }}>
-            numerics & domain
-          </legend>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
-            <NumField label="gamma"   value={gamma} onChange={setGamma} step={0.05} />
-            <NumField label="CFL"     value={cfl}   onChange={setCfl}   step={0.05} />
-            <NumField label="N cells" value={N}     onChange={v => setN(Math.round(v))} step={50} />
-            <NumField label="t end"   value={tEnd}  onChange={setTEnd}  step={0.5} />
-            <NumField label="L"       value={Ldom}  onChange={setLdom}  step={0.1} />
-          </div>
-        </fieldset>
-      </div>
-
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center", marginBottom: 14, padding: "10px 12px",
-                     background: "var(--elevated)", color: "var(--ink)", borderRadius: 10 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          <span>flux</span>
-          <select value={flux} onChange={e => setFlux(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
-            <option value="HLLC">HLLC</option>
-            <option value="HLL">HLL</option>
-            <option value="Roe">Roe</option>
-            <option value="Rusanov">Rusanov</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          <span>view</span>
-          <select value={tubeMode} onChange={e => setTubeMode(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
-            <option value="Mach">Mach</option>
-            <option value="pressure">pressure</option>
-            <option value="temp">temperature</option>
-            <option value="density">density</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>
-          <span>overlay</span>
-          <select value={branch} onChange={e => setBranch(e.target.value)} style={{ background: "var(--field)", color: "var(--ink)" }}>
-            <option value="subsonic">isentropic subsonic</option>
-            <option value="supersonic">isentropic supersonic</option>
-          </select>
-        </label>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase", cursor: "pointer" }}>
-          <input type="checkbox" checked={showIso} onChange={e => setShowIso(e.target.checked)} style={{ accentColor: "var(--accent)" }} />
-          <span>isentropic overlay</span>
-        </label>
-        <button className="btn btn-primary" onClick={() => runFinal()} disabled={busy || animating}>
-          {busy ? "computing..." : "run to t_end"}
-        </button>
-        <button className="btn" onClick={animate} disabled={busy || animating}
-                style={{ background: animating ? "var(--accent-2)" : "var(--field)", color: animating ? "var(--accent-ink)" : "var(--ink)" }}>
-          {animating ? "animating..." : "animate flow"}
-        </button>
-        {animating && <button className="btn" onClick={stopAnim} style={{ background: "var(--field)", color: "var(--ink)" }}>stop</button>}
-        <div style={{ marginLeft: "auto", fontSize: 11, display: "flex", gap: 18, color: "var(--ink)" }}>
-          <span><span style={{ color: "var(--muted)" }}>t = </span>{info.t.toFixed(4)}</span>
-          <span><span style={{ color: "var(--muted)" }}>steps = </span>{info.step}</span>
-          <span><span style={{ color: "var(--muted)" }}>wall = </span>{info.ms.toFixed(0)} ms</span>
-        </div>
-      </div>
-
-      {err && (
-        <div style={{ padding: "8px 12px", border: "1px solid var(--danger)", background: "var(--danger-bg)",
-                       color: "var(--accent)", fontSize: 11, marginBottom: 12 }}>! {err}</div>
-      )}
-
-      <div style={{ marginBottom: 14 }}>
-        <div className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic", fontSize: 13, color: "var(--ink)", marginBottom: 4 }}>
-          {(nozzType === "CD" ? "converging-diverging" : nozzType) + " nozzle · " + (
-            tubeMode === "pressure" ? "pressure field" :
-            tubeMode === "temp"     ? "temperature field" :
-            tubeMode === "Mach"     ? "Mach field" : "density field"
+          {sol && (
+            <div className="plots">
+              {plot("Mach number M", "M", true)}
+              {plot("pressure p", "p", true)}
+              {plot("temperature T", "T", true)}
+              {plot("density ρ", "rho", true)}
+              {plot("total pressure pₜ", "pt", true)}
+              {plot("mass flow ṁ = ρuA (flat at steady state)", "mdot", false)}
+              {res.t.length > 1 && (
+                <PlotCard wide title="convergence · mean |Δρ| / Δt (log scale)" x={res.t} y={res.r} logY
+                          hoverX={frame ? frame.t : null} resetKey={resetKey} />
+              )}
+            </div>
           )}
-        </div>
-        <div style={{ border: "1px solid var(--faint)" }}>
-          {result && nozzleState && <NozzleView result={result} nozzleState={nozzleState} mode={tubeMode} />}
-        </div>
+          <footer className="note">∂U/∂t + ∂F/∂x = H · H = −(A′/A)[ρu, ρu², u(E+p)] · A_throat = 1 · reservoir inlet, back-pressure exit</footer>
+        </main>
       </div>
-
-      {result && (
-        <div style={{ background: "var(--elevated)", padding: 14, borderRadius: 12 }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr 1fr", gap: 14 }}>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.M}   label="Mach M(x)"          color={C.M}
-                    exact={isoResult && showIso ? isoResult.M   : null} />
-            </div>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.p}   label="pressure p(x)"      color={C.p}
-                    exact={isoResult && showIso ? isoResult.p   : null} />
-            </div>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.T}   label="temperature T(x)"   color={C.T}
-                    exact={isoResult && showIso ? isoResult.T   : null} />
-            </div>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.rho} label="density ρ(x)"  color={C.rho}
-                    exact={isoResult && showIso ? isoResult.rho : null} />
-            </div>
-            <div style={{ background: "#efe9d8", padding: "8px 8px 3px", borderRadius: 8 }}>
-              <Plot x={result.x} y={result.pt}  label="total pressure pₜ(x)" color={C.pt}
-                    exact={isoResult && showIso ? isoResult.pt  : null} />
-            </div>
-          </div>
-        </div>
-      )}
-
-      <footer style={{ marginTop: 16, paddingTop: 10, borderTop: "1px solid var(--line)", fontSize: 10, color: "var(--muted)",
-                        display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-        <span>dU/dt + dF/dx = H  {"·"}  H = -(dA/dx)/A [0, ρu², u(E+p)]  {"·"}  A_throat = 1</span>
-        <span className="smallcaps">quasi-1D {"·"} isentropic reservoir BC {"·"} ideal gas</span>
-      </footer>
     </div>
   );
 }
 
-// ---------- Top-level app with solver switcher ----------
+// ============================================================
+// Shell: hash-routed between the two 1D labs, shared help drawer
+// ============================================================
+function routeFromHash() { return location.hash === "#nozzle" ? "nozzle" : "shocktube"; }
+
 function App() {
-  const [mode, setMode] = useState("shocktube");
-  const tabStyle = active => ({
-    fontFamily: "ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
-    fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase",
-    padding: "10px 18px", border: "none", cursor: "pointer",
-    borderBottom: active ? "2.5px solid var(--accent)" : "2.5px solid transparent",
-    background: "transparent",
-    color: active ? "var(--accent)" : "var(--muted)",
-    fontWeight: active ? 700 : 400,
-    transition: "color 120ms"
-  });
+  const [mode, setMode] = useState(routeFromHash());
+  const [help, setHelp] = useState(false);
+  useEffect(() => {
+    const onHash = () => setMode(routeFromHash());
+    const onKey = e => { if (e.key === "Escape") setHelp(false); };
+    window.addEventListener("hashchange", onHash);
+    window.addEventListener("keydown", onKey);
+    return () => { window.removeEventListener("hashchange", onHash); window.removeEventListener("keydown", onKey); };
+  }, []);
+  const toggleHelp = () => setHelp(h => !h);
   return (
-    <div style={{ background: "#efe9d8", minHeight: "100vh" }}>
-      <div style={{ display: "flex", alignItems: "flex-end", gap: 0,
-                     borderBottom: "1.5px solid var(--line)", background: "var(--surface)",
-                     padding: "0 22px", position: "sticky", top: 0, zIndex: 10 }}>
-        <span className="smallcaps" style={{ fontFamily: "ui-serif, 'Iowan Old Style', Palatino, Georgia, serif", fontStyle: "italic",
-                     fontSize: 13, color: "var(--ink)", padding: "10px 14px 10px 0", alignSelf: "center" }}>
-          Euler Lab
-        </span>
-        <button style={tabStyle(mode === "shocktube")} onClick={() => setMode("shocktube")}>
-          Shock Tube
-        </button>
-        <button style={tabStyle(mode === "nozzle")} onClick={() => setMode("nozzle")}>
-          Nozzle Flow
-        </button>
-        <a href="index2d.html" style={{ ...tabStyle(false), marginLeft: "auto", textDecoration: "none" }}>
-          2D Laboratory →
-        </a>
-      </div>
-      <details style={{ padding: "8px 22px 0", fontSize: 11, color: "#E7E9EC", backgroundColor: "#14161A" }}>
-        <summary style={{ cursor: "pointer", letterSpacing: "0.06em", textTransform: "uppercase", fontSize: 10 }}>
-          what am I looking at?
-        </summary>
-        <p style={{ margin: "6px 0 0", maxWidth: 760, lineHeight: 1.5 }}>
-          A browser-based compressible-flow lab. <b>Shock Tube</b> bursts a diaphragm between two gas
-          states (a Riemann problem) and evolves the shocks, contact, and rarefaction; the dashed grey
-          curve is the exact solution. <b>Nozzle Flow</b> drives a convergent / divergent / CD duct from a
-          reservoir and shows how the flow chokes and forms shocks. Pick a <i>preset</i> to start, choose a
-          Riemann <i>flux</i>, then <i>run</i> or <i>animate</i>. Everything runs client-side — no server, no
-          install. The <b>2D Laboratory →</b> link switches to the two-dimensional version.
-        </p>
-      </details>
-      {mode === "shocktube" ? <ShockTubeApp /> : <NozzleApp />}
-    </div>
+    <React.Fragment>
+      {mode === "nozzle" ? <NozzleApp key="nozzle" onHelp={toggleHelp} /> : <ShockTubeApp key="tube" onHelp={toggleHelp} />}
+      <HelpDrawer open={help} onClose={() => setHelp(false)}>
+        <h2>Euler Lab</h2>
+        <p>A browser-based compressible-flow laboratory: second-order finite-volume solutions of the Euler
+          equations, computed live on your machine. No server, no install.</p>
+        <p><b>Shock tube</b> bursts a diaphragm between two gas states (a Riemann problem). The solid orange curve
+          is the numerical solution; the dashed grey curve is the exact one.</p>
+        <p><b>Nozzle</b> drives a convergent / divergent / CD duct from a reservoir and shows how the flow chokes and
+          forms shocks. The convergence plot shows how close the run is to steady state.</p>
+        <h3>Workflow</h3>
+        <p>Pick a preset (it solves immediately), or edit parameters and press <b>Solve</b>. The run computes in
+          small slices between animation frames, so the page stays responsive and the view follows the solution
+          as it develops. Afterwards <b>Play</b> replays it at a steady rate, and the timeline scrubs to any
+          moment. Hover any plot or the field view to probe values — the cursor is linked across every panel.</p>
+      </HelpDrawer>
+    </React.Fragment>
   );
 }
 
@@ -1020,22 +724,23 @@ if (!window.__eulerRoot) {
 window.__eulerRoot.render(<App />);
 </script>
 
-<!-- Resilience net (additive, cosmetic-neutral): if @babel/standalone finishes
-     loading AFTER DOMContentLoaded, its automatic transform of the text/babel
-     script never fires and the page stays on "Loading...". Kick it manually.
-     No-op on the normal path (guarded on the "Loading" placeholder). -->
+<!-- Resilience net: if @babel/standalone finishes loading AFTER DOMContentLoaded,
+     its automatic transform of the text/babel script never fires and the page
+     stays on "Loading...". Kick it manually. No-op on the normal path. -->
 <script>
-(function ensureBabelRuns(tries){
-  var root = document.getElementById('root');
-  if (!root) return;
-  if (/Loading\.\.\./.test(root.textContent) && window.Babel && window.React && window.ReactDOM) {
-    try { window.Babel.transformScriptTags(); } catch (e) {}
-  }
-  root = document.getElementById('root');
-  if (root && /Loading\.\.\./.test(root.textContent) && tries < 60) {
-    setTimeout(function(){ ensureBabelRuns(tries + 1); }, 120);
-  }
-})(0);
+// Runs only after the page has loaded and only if the app script never
+// started (window.__eulerBooted), so it can't execute the app twice.
+window.addEventListener('load', function () {
+  (function ensureBabelRuns(tries){
+    if (window.__eulerBooted) return;
+    if (window.Babel && window.React && window.ReactDOM) {
+      try { window.Babel.transformScriptTags(); } catch (e) {}
+    }
+    if (!window.__eulerBooted && tries < 60) {
+      setTimeout(function(){ ensureBabelRuns(tries + 1); }, 120);
+    }
+  })(0);
+});
 </script>
 </body>
 </html>

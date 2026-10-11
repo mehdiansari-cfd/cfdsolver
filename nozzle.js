@@ -4,22 +4,27 @@
    Equations:  dU/dt + dF/dx = H
                H = -(dA/dx)/A * [rho*u, rho*u^2, u*(E+p)]
    A(x): parabolic profiles, A_throat = 1 by convention.
-   Depends on solver.js: primToCons, FLUXES, hllc, computeRhs, extract
+   Depends on solver.js: primToCons, FLUXES, hllc, computeRhs, stableDt, extract
    ============================================================ */
 
 // ---------- Dependencies on solver.js ----------
 // Browser: solver.js is loaded first and its functions are page globals, so
 // `typeof primToCons` is "function" and this block is skipped (a bare `var`
-// redeclaration of an existing global leaves it untouched).
+// redeclaration of a global *function* leaves it untouched).
 // Node: module scope does not see another module's functions, so pull them in
-// explicitly. `var` (not const) is what lets the same file work in both.
+// explicitly. Only function declarations may be aliased with `var` here:
+// solver.js declares FLUXES with `const`, and a `var FLUXES` anywhere in this
+// file would be a redeclaration error in the browser — see _fluxTable().
 if (typeof primToCons === "undefined" && typeof require === "function") {
   var _solver    = require("./solver");
   var primToCons = _solver.primToCons;
-  var FLUXES     = _solver.FLUXES;
   var hllc       = _solver.hllc;
   var computeRhs = _solver.computeRhs;
+  var stableDt   = _solver.stableDt;
   var extract    = _solver.extract;
+}
+function _fluxTable() {
+  return typeof FLUXES !== "undefined" ? FLUXES : _solver.FLUXES;
 }
 
 // ---------- Area profiles ----------
@@ -160,22 +165,13 @@ function initNozzleState(p) {
 // ---------- Step forward to tTarget (SSP-RK2 + adaptive CFL) ----------
 function nozzleStepUntil(state, tTarget) {
   const { N, dx, gamma, cfl, A, dA, p0, T0, pb } = state;
-  const fluxFn = FLUXES[state.flux] || hllc;
+  const fluxFn = _fluxTable()[state.flux] || hllc;
   let { rho, mom, ene, t, step } = state;
   let budget = 80000;
 
   while (t < tTarget && budget-- > 0) {
-    let maxSpeed = 0;
-    for (let i = 0; i < N; i++) {
-      const k = i + 2;
-      const u = mom[k] / rho[k];
-      const p = (gamma - 1) * (ene[k] - 0.5 * rho[k] * u * u);
-      const a = Math.sqrt(gamma * Math.max(p, 1e-12) / Math.max(rho[k], 1e-12));
-      const s = Math.abs(u) + a;
-      if (s > maxSpeed) maxSpeed = s;
-    }
-    if (maxSpeed < 1e-12) break;
-    let dt = cfl * dx / maxSpeed;
+    let dt = stableDt({ rho, mom, ene, N, dx, gamma, cfl });
+    if (!(dt < Infinity)) break;
     if (t + dt > tTarget) dt = tTarget - t;
 
     // Stage 1
