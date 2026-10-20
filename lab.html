@@ -1,0 +1,1773 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Euler Lab · 1D</title>
+<script>
+  // Apply a saved light / dark choice before first paint (otherwise the system setting decides).
+  try { var t = localStorage.getItem("eulerlab-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+<link rel="stylesheet" href="lab.css">
+
+<!-- React + Babel from CDN (UI rendering only). Versions are pinned so an
+     upstream release can never change or break the page. -->
+<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<script>
+  // Force the classic JSX runtime (React.createElement). The automatic runtime
+  // emits `import ... "react/jsx-runtime"`, which a non-module page with UMD
+  // React can't resolve — leaving the page stuck on "Loading...".
+  Babel.registerPreset('react-classic', {
+    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
+  });
+</script>
+
+<!-- Shared UI layer (playback engine, plots, controls). Needs React. -->
+<script src="labui.js"></script>
+<!-- Math layer, no DOM. Order matters: gas → solver → nozzle → facility → case → verify. -->
+<script src="gas.js"></script>
+<script src="solver.js"></script>
+<script src="nozzle.js"></script>
+<script src="boundary.js"></script>
+<script src="facility.js"></script>
+<script src="case.js"></script>
+<script src="verify.js"></script>
+</head>
+<body>
+<div id="root"><div class="boot">Loading...</div></div>
+
+<!-- UI layer: React components only. Math comes from the scripts above. -->
+<script type="text/babel" data-presets="react-classic">
+window.__eulerBooted = true;
+const { useState, useEffect, useMemo, useRef } = React;
+const {
+  THEME, fmt, CMAP, niceTicks, useCanvas, useSmoothRange, finiteRange, usePlayer, useShortcuts,
+  NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe,
+  downloadText, pickTextFile, numericTable, runSliced
+} = LabUI;
+
+// n significant figures (exponent form for very large / small magnitudes)
+const sig = (v, n) => !Number.isFinite(v) ? "—"
+  : (Math.abs(v) >= 1e6 || (Math.abs(v) < 1e-3 && v !== 0)) ? v.toExponential(n - 1) : String(+v.toPrecision(n));
+const FLUX_OPTIONS = ["HLLC", "HLL", "Roe", "Rusanov"];
+const FRAMES_1D = 300;       // recorded frames per run (scrub resolution)
+const CFL_SAFE = 0.5;        // MUSCL + SSP-RK2 practical limit (CLAUDE.md §4)
+
+
+// Index of the cell containing domain position x (cells of width dx from 0).
+function cellAt(x, dx, N) { return Math.max(0, Math.min(N - 1, Math.floor(x / dx))); }
+
+// Reject a state the solver can't continue from: NaN, or non-positive rho / p.
+function check1D(s) {
+  const { rho, mom, ene, N, rY } = s;
+  const eos = s.eos || idealEos(s.gamma);
+  for (let i = 2; i < N + 2; i++) {
+    if (!(rho[i] > 0)) return "Density became non-positive or NaN";
+    const q = eos.prim(rho[i], mom[i], ene[i], rY ? rY[i] : undefined);
+    if (!(q.p > 0) || !Number.isFinite(q.T)) return "Pressure became negative or NaN";
+  }
+  return null;
+}
+const recordConserved = s => ({ rho: s.rho.slice(), mom: s.mom.slice(), ene: s.ene.slice(), rY: s.rY ? s.rY.slice() : null });
+
+// Draw a scalar field as a smooth colour strip: one texel per cell, stretched
+// by drawImage with bilinear filtering so motion reads continuously.
+function drawFieldStrip(ctx, field, lo, hi, x0, y0, w, h, clipPath) {
+  const N = field.length;
+  const off = drawFieldStrip.off || (drawFieldStrip.off = document.createElement("canvas"));
+  if (off.width !== N) { off.width = N; off.height = 1; }
+  const octx = off.getContext("2d");
+  const img = octx.createImageData(N, 1), d = img.data;
+  const inv = 1 / Math.max(hi - lo, 1e-12);
+  for (let i = 0; i < N; i++) {
+    const k = 3 * Math.max(0, Math.min(255, Math.round((field[i] - lo) * inv * 255)));
+    d[4 * i] = CMAP[k]; d[4 * i + 1] = CMAP[k + 1]; d[4 * i + 2] = CMAP[k + 2]; d[4 * i + 3] = 255;
+  }
+  octx.putImageData(img, 0, 0);
+  ctx.save();
+  if (clipPath) { clipPath(ctx); ctx.clip(); }
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(off, 0, 0, N, 1, x0, y0, w, h);
+  ctx.restore();
+}
+
+function schlieren(rho) {
+  const N = rho.length, out = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const iL = Math.max(0, i - 1), iR = Math.min(N - 1, i + 1);
+    out[i] = Math.sqrt(Math.abs(rho[iR] - rho[iL]));   // sqrt stretch: weak waves stay visible
+  }
+  return out;
+}
+
+// ============================================================
+// Lagrangian tracers: advected with the displayed velocity while the
+// frame moves forward in small steps; frozen across seeks; re-seeded per run.
+// ============================================================
+const TRACERS = 220;
+function useTracers(sol, frame, L, runId, maxJump) {
+  const st = useRef({ run: null, t: null, frame: null, pts: [] });
+  const s = st.current;
+  if (!sol || !frame) return s.pts;
+  if (s.run !== runId) {
+    s.run = runId; s.t = frame.t; s.frame = frame; s.pts = [];
+    for (let i = 0; i < TRACERS; i++) {
+      const x = Math.random() * L;
+      s.pts.push({ x, prevX: x, y: 0.12 + Math.random() * 0.76 });
+    }
+    return s.pts;
+  }
+  if (s.frame === frame) return s.pts;
+  const dt = frame.t - s.t;
+  s.frame = frame; s.t = frame.t;
+  if (dt <= 0 || dt > maxJump) { for (const p of s.pts) p.prevX = p.x; return s.pts; }
+  const N = sol.x.length, dx = L / N;
+  for (const p of s.pts) {
+    p.prevX = p.x;
+    p.x += sol.u[cellAt(p.x, dx, N)] * dt;
+    if (p.x < 0 || p.x > L) { p.x = Math.random() * L; p.prevX = p.x; p.y = 0.12 + Math.random() * 0.76; }
+  }
+  return s.pts;
+}
+
+// ============================================================
+// Shock tube view: field strip + tracers + probe line
+// ============================================================
+function TubeView({ sol, field, lo, hi, L, diaphragm, showDiaphragm, tracers, hoverX, onHover }) {
+  const geo = useRef(null);
+  const ref = useCanvas((ctx, W, H) => {
+    const padX = 14, padT = 12, padB = 20;
+    const tx = padX, ty = padT, tw = W - 2 * padX, th = H - padT - padB;
+    geo.current = { tx, tw };
+    ctx.fillStyle = THEME.stage; ctx.fillRect(0, 0, W, H);
+    if (!sol) return;
+    drawFieldStrip(ctx, field, lo, hi, tx, ty, tw, th);
+
+    // tube-wall shading
+    const g = ctx.createLinearGradient(0, ty, 0, ty + th);
+    g.addColorStop(0, "rgba(0,0,0,0.28)"); g.addColorStop(0.5, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.28)");
+    ctx.fillStyle = g; ctx.fillRect(tx, ty, tw, th);
+
+    if (tracers) {
+      ctx.lineCap = "round";
+      for (const p of tracers) {
+        const x1 = tx + (p.prevX / L) * tw, x2 = tx + (p.x / L) * tw, y = ty + p.y * th;
+        if (Math.abs(x2 - x1) < 0.4) {
+          ctx.fillStyle = "rgba(20,18,16,0.55)";
+          ctx.beginPath(); ctx.arc(x2, y, 1, 0, Math.PI * 2); ctx.fill();
+        } else {
+          ctx.strokeStyle = "rgba(20,18,16,0.7)"; ctx.lineWidth = 1.2;
+          ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+          ctx.fillStyle = "#8b3a2f";
+          ctx.beginPath(); ctx.arc(x2, y, 1.3, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+    }
+    if (showDiaphragm) {
+      const dxp = tx + (diaphragm / L) * tw;
+      ctx.strokeStyle = THEME.accent; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(dxp, ty - 4); ctx.lineTo(dxp, ty + th + 4); ctx.stroke(); ctx.setLineDash([]);
+    }
+    if (hoverX != null) {
+      const hx = Math.round(tx + (hoverX / L) * tw) + 0.5;
+      ctx.strokeStyle = THEME.cursor; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx, ty - 5); ctx.lineTo(hx, ty + th + 5); ctx.stroke();
+    }
+    ctx.strokeStyle = THEME.axis; ctx.lineWidth = 1;
+    ctx.strokeRect(tx + 0.5, ty + 0.5, tw - 1, th - 1);
+    ctx.font = THEME.font; ctx.fillStyle = THEME.tick; ctx.textBaseline = "top";
+    ctx.textAlign = "left";  ctx.fillText("x = 0", tx, ty + th + 6);
+    ctx.textAlign = "right"; ctx.fillText("x = " + L, tx + tw, ty + th + 6);
+  }, [sol, field, lo, hi, L, diaphragm, showDiaphragm, tracers, hoverX]);
+
+  const onMove = e => {
+    const g = geo.current; if (!g) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const f = (e.clientX - r.left - g.tx) / g.tw;
+    onHover(f < 0 || f > 1 ? null : f * L);
+  };
+  return <canvas ref={ref} className="stage-canvas" style={{ height: 132 }}
+                 onMouseMove={onMove} onMouseLeave={() => onHover(null)} />;
+}
+
+// Keyboard shortcuts shared by both 1D workspaces.
+function usePlayerKeys(player, stale, run, onHelp) {
+  useShortcuts({
+    "Enter": () => run("solve"),
+    " ": () => (player && !stale ? player.toggle() : run("play")),
+    "ArrowLeft": () => player && player.stepFrame(-1),
+    "ArrowRight": () => player && player.stepFrame(1),
+    "Home": () => player && player.seek(0),
+    "End": () => player && player.seek(player.tEnd),
+    "?": onHelp
+  });
+}
+
+// ============================================================
+// Shock tube workspace
+// ============================================================
+// Gases and units
+// ============================================================
+const GAS_NAMES = Object.keys(GASES);
+const REAL_GAS_OPTIONS = GAS_NAMES.map(k => ({ value: k, label: GASES[k].label }));
+const GAS_OPTIONS = [{ value: "ideal", label: "Ideal γ (non-dimensional)" }].concat(REAL_GAS_OPTIONS);
+const THERMO_OPTIONS = [
+  { value: "thermally-perfect",   label: "thermally perfect, γ(T)" },
+  { value: "calorically-perfect", label: "calorically perfect, γ at 298 K" }
+];
+const KPA = 1e-3, MS = 1e3, CM2 = 1e4;     // display scales: Pa → kPa, s → ms, m² → cm²
+const T_WARN = 2500;                        // K: above this, frozen non-dissociating gas is a poor model
+const safeName = s => String(s || "case").replace(/[^A-Za-z0-9._-]+/g, "_");
+
+// Case-file buttons shared by the workspaces.
+function CaseSection({ onSave, onLoad, onExport, exportLabel }) {
+  return (
+    <Section title="Case & export">
+      <div className="grid-2">
+        <button className="btn" onClick={onSave} title="Download this setup as a JSON case (runs with node run.js)">Save case</button>
+        <button className="btn" onClick={onLoad} title="Load a JSON case file">Load case…</button>
+      </div>
+      <button className="btn" onClick={onExport} title="Download the fields at the current time as CSV">{exportLabel || "Export CSV (current time)"}</button>
+      <div className="note">Saved cases run headless: <code>node run.js case.json</code></div>
+    </Section>
+  );
+}
+
+// ============================================================
+// Shock tube workspace
+// ============================================================
+const ST_SI_PRESETS = {
+  "Air 10:1 bar":           { gasL: "air", gasR: "air", left: { p: 10e5, T: 300, u: 0 },  right: { p: 1e5, T: 300, u: 0 }, L: 1, x0: 0.5, tEnd: 6e-4 },
+  "He → air (two gases)":   { gasL: "He",  gasR: "air", left: { p: 20e5, T: 300, u: 0 },  right: { p: 1e4, T: 300, u: 0 }, L: 1, x0: 0.5, tEnd: 2.5e-4 },
+  "Hot CO₂ (γ(T) matters)": { gasL: "CO2", gasR: "CO2", left: { p: 20e5, T: 1500, u: 0 }, right: { p: 1e5, T: 300, u: 0 }, L: 1, x0: 0.5, tEnd: 5e-4 }
+};
+
+function stDefaults() {
+  const p = PRESETS["Sod"];
+  return { preset: "Sod", gasL: "ideal", gasR: "ideal", thermo: "thermally-perfect",
+           ndLeft: p.L, ndRight: p.R, siLeft: ST_SI_PRESETS["Air 10:1 bar"].left, siRight: ST_SI_PRESETS["Air 10:1 bar"].right,
+           N: 400, L: 1, tEnd: p.tEnd, gamma: 1.4, cfl: 0.4, x0: p.diaphragm, bc: "transmissive", flux: "HLLC" };
+}
+function stFromCase(c) {
+  const d = stDefaults(), n = c.numerics || {};
+  const g = c.gas, legacy = !c.gasLeft && g && typeof g.gamma === "number";
+  const name = x => (typeof x === "string" ? x : x && x.name);
+  const model = (c.gas && c.gas.model) || (c.gasLeft && c.gasLeft.model) || c.thermo || d.thermo;
+  return Object.assign(d, {
+    preset: c.name || null,
+    gasL: legacy ? "ideal" : name(c.gasLeft || g), gasR: legacy ? "ideal" : name(c.gasRight || g), thermo: model,
+    gamma: legacy ? g.gamma : d.gamma,
+    ndLeft: legacy ? c.left : d.ndLeft, ndRight: legacy ? c.right : d.ndRight,
+    siLeft: legacy ? d.siLeft : c.left, siRight: legacy ? d.siRight : c.right,
+    N: n.N || d.N, cfl: n.cfl || d.cfl, flux: n.flux || d.flux, L: c.L, x0: c.diaphragm, tEnd: c.tEnd, bc: c.bc || d.bc
+  });
+}
+
+function ShockTubeApp({ onHelp, initialCase, onLoadCase }) {
+  const init = useMemo(() => (initialCase ? stFromCase(initialCase) : stDefaults()), []);
+  const [preset, setPreset]       = useState(init.preset);
+  const [gasL, setGasL]           = useState(init.gasL);
+  const [gasR, setGasR]           = useState(init.gasR);
+  const [thermo, setThermo]       = useState(init.thermo);
+  const [ndLeft, setNdLeft]       = useState(init.ndLeft);
+  const [ndRight, setNdRight]     = useState(init.ndRight);
+  const [siLeft, setSiLeft]       = useState(init.siLeft);
+  const [siRight, setSiRight]     = useState(init.siRight);
+  const [N, setN]                 = useState(init.N);
+  const [Ldom, setLdom]           = useState(init.L);
+  const [tEnd, setTEnd]           = useState(init.tEnd);
+  const [gamma, setGamma]         = useState(init.gamma);
+  const [cfl, setCfl]             = useState(init.cfl);
+  const [diaphragm, setDiaphragm] = useState(init.x0);
+  const [bcType, setBcType]       = useState(init.bc);
+  const [flux, setFlux]           = useState(init.flux);
+  const [overlay, setOverlay]     = useState(true);
+  const [tubeMode, setTubeMode]   = useState("density");
+  const [showDerived, setShowDerived] = useState(true);
+  const [showTracers, setShowTracers] = useState(true);
+  const [hoverX, setHoverX]       = useState(null);
+  const [err, setErr]             = useState(null);
+
+  const [player, startPlayer] = usePlayer();
+  const solved = useRef({ key: null, spec: null, run: 0 });
+
+  const legacy = gasL === "ideal";
+  // Serializable description of the setup (gases by name); params are built from it.
+  const spec = useMemo(() => ({
+    legacy, gasL: legacy ? null : gasL, gasR: legacy ? null : (gasR === "ideal" ? gasL : gasR), thermo,
+    left: legacy ? ndLeft : siLeft, right: legacy ? ndRight : siRight,
+    N, L: Ldom, tEnd, gamma, cfl, diaphragm, bcType, flux
+  }), [legacy, gasL, gasR, thermo, ndLeft, ndRight, siLeft, siRight, N, Ldom, tEnd, gamma, cfl, diaphragm, bcType, flux]);
+  const stale = !!player && solved.current.key !== JSON.stringify(spec);
+
+  const gasesOf = S => S.legacy ? null : { L: gasModel(S.gasL, S.thermo), R: gasModel(S.gasR, S.thermo) };
+  const buildParams = S => {
+    const base = { N: S.N, L: S.L, tEnd: S.tEnd, cfl: S.cfl, diaphragm: S.diaphragm, leftState: S.left, rightState: S.right,
+                   bcType: S.bcType, flux: S.flux };
+    if (S.legacy) return Object.assign(base, { gamma: S.gamma });
+    const g = gasesOf(S);
+    return Object.assign(base, S.gasL === S.gasR ? { gas: g.L } : { gasLeft: g.L, gasRight: g.R });
+  };
+
+  const validate = S => {
+    const st = [S.left, S.right];
+    if (S.legacy) {
+      if (!st.every(s => s.rho > 0)) return "Density must be positive.";
+      if (!(S.gamma > 1)) return "γ must be greater than 1.";
+    } else if (!st.every(s => s.T > 0)) return "Temperature must be positive.";
+    if (!st.every(s => s.p > 0))                       return "Pressure must be positive.";
+    if (!(S.cfl > 0 && S.cfl <= 0.9))                  return "CFL must be in (0, 0.9].";
+    if (!(S.N >= 20 && S.N <= 2000))                   return "N must be between 20 and 2000.";
+    if (!(S.tEnd > 0))                                 return "t_end must be positive.";
+    if (!(S.L > 0))                                    return "L must be positive.";
+    if (!(S.diaphragm > 0 && S.diaphragm < S.L))       return "The diaphragm must lie inside the domain.";
+    return null;
+  };
+
+  const run = (mode, S) => {
+    S = S || spec;
+    const e = validate(S); setErr(e); if (e) return;
+    solved.current = { key: JSON.stringify(S), spec: S, run: solved.current.run + 1 };
+    const P = buildParams(S);
+    startPlayer({
+      tEnd: S.tEnd, maxFrames: FRAMES_1D, playSeconds: 6,
+      init: () => initState(P),
+      advance: (s, t) => stepUntil(s, t),
+      stableDt,
+      record: recordConserved,
+      check: check1D
+    }, mode);
+  };
+
+  const loadPreset = name => {
+    const q = PRESETS[name];
+    setPreset(name); setGasL("ideal"); setGasR("ideal"); setNdLeft(q.L); setNdRight(q.R); setTEnd(q.tEnd); setDiaphragm(q.diaphragm); setLdom(1);
+    run("solve", Object.assign({}, spec, { legacy: true, gasL: null, gasR: null, left: q.L, right: q.R, tEnd: q.tEnd, diaphragm: q.diaphragm, L: 1 }));
+  };
+  const loadSiPreset = name => {
+    const q = ST_SI_PRESETS[name];
+    setPreset(name); setGasL(q.gasL); setGasR(q.gasR); setSiLeft(q.left); setSiRight(q.right);
+    setTEnd(q.tEnd); setDiaphragm(q.x0); setLdom(q.L);
+    run("solve", Object.assign({}, spec, { legacy: false, gasL: q.gasL, gasR: q.gasR, left: q.left, right: q.right,
+                                            tEnd: q.tEnd, diaphragm: q.x0, L: q.L }));
+  };
+
+  useEffect(() => { run("solve"); /* eslint-disable-next-line */ }, []);
+  usePlayerKeys(player, stale, run, onHelp);
+
+  // ---- what to show: the frame under the playback cursor ----
+  const SP = solved.current.spec;
+  const frame = player ? player.current() : null;
+  const meta = useMemo(() => (player && player.sim ? player.sim : null), [player]);
+  const sol = useMemo(() => {
+    if (!frame || !SP || !meta) return null;
+    return extract(Object.assign({}, meta, frame.snap));
+  }, [frame, SP, meta]);
+
+  // Real-gas exact Riemann problem: solved once per run, sampled per frame.
+  const exactSolved = useMemo(() => {
+    if (!SP || SP.legacy) return null;
+    const g = gasesOf(SP);
+    try { return riemannGasSolve(g.L, SP.left, g.R, SP.right); } catch (e) { return null; }
+  }, [SP]);
+  const exact = useMemo(() => {
+    if (!sol || !overlay || SP.bcType !== "transmissive") return null;
+    if (!SP.legacy) {
+      if (!exactSolved) return null;
+      const g = gasesOf(SP);
+      return exactRiemannGas(g.L, SP.left, g.R, SP.right, SP.diaphragm, frame.t, sol.x, exactSolved);
+    }
+    const ex = exactRiemann(SP.left, SP.right, SP.gamma, SP.diaphragm, frame.t, sol.x);
+    if (!ex) return null;
+    const n = ex.rho.length, g = SP.gamma;
+    const d = { M: new Array(n), T: new Array(n), s: new Array(n), a: new Array(n), e: new Array(n) };
+    for (let i = 0; i < n; i++) {
+      const r = Math.max(ex.rho[i], 1e-12), p = Math.max(ex.p[i], 1e-12);
+      const a = Math.sqrt(g * p / r);
+      d.a[i] = a; d.M[i] = ex.u[i] / a; d.T[i] = p / r;
+      d.s[i] = Math.log(p / Math.pow(r, g)); d.e[i] = p / ((g - 1) * r);
+    }
+    return Object.assign(ex, d);
+  }, [sol, overlay, SP, exactSolved]);
+
+  const field = useMemo(() => !sol ? null
+    : tubeMode === "pressure" ? sol.p
+    : tubeMode === "Mach" ? sol.M
+    : tubeMode === "temperature" ? sol.T
+    : tubeMode === "schlieren" ? schlieren(sol.rho)
+    : sol.rho, [sol, tubeMode]);
+  const [flo, fhi] = finiteRange([field]);
+  const [lo, hi] = useSmoothRange(flo, fhi, solved.current.run + tubeMode);
+  const tracers = useTracers(showTracers ? sol : null, frame, SP ? SP.L : 1, solved.current.run,
+                             SP ? 4 * SP.tEnd / FRAMES_1D : 0);
+
+  const si = SP && !SP.legacy;
+  const U = si ? { p: " kPa", T: " K", u: " m/s", x: " m" } : { p: "", T: "", u: "", x: "" };
+  let probe = null, where = "";
+  if (sol && hoverX != null) {
+    const i = cellAt(hoverX, SP.L / SP.N, SP.N);
+    where = "x = " + sig(sol.x[i], 3) + U.x;
+    probe = [["ρ", sol.rho[i]], ["u", sol.u[i]], ["p", si ? sol.p[i] * KPA : sol.p[i]], ["T", sol.T[i]], ["M", sol.M[i]]];
+    if (sol.Y) probe.push(["Y", sol.Y[i]]);
+  }
+
+  // ---- case files ----
+  const toCase = S => {
+    const c = { kind: "shocktube", name: preset || "shocktube", L: S.L, diaphragm: S.diaphragm, bc: S.bcType,
+                left: S.left, right: S.right, numerics: { N: S.N, cfl: S.cfl, flux: S.flux }, tEnd: S.tEnd };
+    if (S.legacy) c.gas = { gamma: S.gamma };
+    else if (S.gasL === S.gasR) c.gas = { name: S.gasL, model: S.thermo };
+    else { c.gasLeft = { name: S.gasL, model: S.thermo }; c.gasRight = { name: S.gasR, model: S.thermo }; }
+    return c;
+  };
+  const saveCase = () => downloadText(safeName(preset) + ".json", JSON.stringify(toCase(spec), null, 2) + "\n", "application/json");
+  const exportCSV = () => {
+    if (!sol) return;
+    const header = ["case: " + (preset || "shocktube") + " (shocktube)", "t = " + frame.t + " s"];
+    downloadText(safeName(preset) + "_t=" + frame.t.toExponential(3) + ".csv", fieldsToCSV(sol, { header, si }), "text/csv");
+  };
+
+  const resetKey = solved.current.run;
+  const plot = (title, key, scale) => (
+    <PlotCard key={key} title={title} x={sol.x} y={sol[key]} yScale={scale}
+              refY={exact && exact[key] ? exact[key] : null} refLabel="exact Riemann"
+              hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
+  );
+  const modeLabel = { density: "density ρ", schlieren: "schlieren |∂ρ/∂x|", pressure: "pressure p",
+                      temperature: "temperature T", Mach: "Mach M" }[tubeMode];
+  const hotWarning = si && sol && Math.max(...sol.T) > T_WARN;
+
+  const stateFields = (st, set, side) => legacy ? (
+    <div className="grid-3">
+      <NumField label="ρ" value={st.rho} onChange={v => set({ ...st, rho: v })} />
+      <NumField label="u" value={st.u}   onChange={v => set({ ...st, u: v })} />
+      <NumField label="p" value={st.p}   onChange={v => set({ ...st, p: v })} />
+    </div>
+  ) : (
+    <div className="grid-3">
+      <NumField label="p [kPa]" value={+(st.p * KPA).toPrecision(8)} onChange={v => set({ ...st, p: v / KPA })} />
+      <NumField label="T [K]"   value={st.T} onChange={v => set({ ...st, T: v })} step={10} />
+      <NumField label="u [m/s]" value={st.u} onChange={v => set({ ...st, u: v })} step={10} />
+    </div>
+  );
+
+  return (
+    <div className="app">
+      <TopBar active="shocktube" scheme={flux + " · MUSCL–minmod · SSP-RK2"} onHelp={onHelp} />
+      <div className="workspace">
+        <aside className="rail">
+          <p className="rail-intro">
+            Burst a diaphragm between two gas states and watch the rarefaction, contact and shock separate.
+          </p>
+          <Section title="Preset">
+            <div className="presets">
+              {Object.keys(PRESETS).map(name => (
+                <button key={name} className={"preset" + (preset === name ? " on" : "")}
+                        onClick={() => loadPreset(name)}>{name}</button>
+              ))}
+            </div>
+            <div className="presets">
+              {Object.keys(ST_SI_PRESETS).map(name => (
+                <button key={name} className={"preset" + (preset === name ? " on" : "")}
+                        onClick={() => loadSiPreset(name)}>{name}</button>
+              ))}
+            </div>
+          </Section>
+          <Section title="Gas">
+            <SelectField label="Left gas" value={gasL} onChange={v => { setGasL(v); if (v === "ideal") setGasR("ideal"); else if (gasR === "ideal") setGasR(v); }}
+                         options={GAS_OPTIONS} />
+            {legacy ? <NumField label="γ" value={gamma} onChange={setGamma} step={0.05} /> : (
+              <React.Fragment>
+                <SelectField label="Right gas" value={gasR} onChange={setGasR} options={REAL_GAS_OPTIONS} />
+                <SelectField label="Thermodynamic model" value={thermo} onChange={setThermo} options={THERMO_OPTIONS} />
+                <div className="note">SI units. Different left / right gases run as a two-gas flow with a transported mass fraction.</div>
+              </React.Fragment>
+            )}
+          </Section>
+          <Section title={legacy ? "Left state" : "Left state (driver)"}>{stateFields(legacy ? ndLeft : siLeft, legacy ? setNdLeft : setSiLeft)}</Section>
+          <Section title={legacy ? "Right state" : "Right state (driven)"}>{stateFields(legacy ? ndRight : siRight, legacy ? setNdRight : setSiRight)}</Section>
+          <Section title="Numerics">
+            <div className="grid-2">
+              <SelectField label="Riemann flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />
+              <SelectField label="Boundaries" value={bcType} onChange={setBcType} options={["transmissive", "reflective"]} />
+            </div>
+            <div className="grid-3">
+              <NumField label="N cells" value={N} onChange={v => setN(Math.round(v))} step={50} />
+              <NumField label="CFL" value={cfl} onChange={setCfl} step={0.05} />
+              {legacy ? <NumField label="t end" value={tEnd} onChange={setTEnd} step={0.01} />
+                      : <NumField label="t end [ms]" value={+(tEnd * MS).toPrecision(8)} onChange={v => setTEnd(v / MS)} step={0.05} />}
+              <NumField label={legacy ? "L" : "L [m]"} value={Ldom} onChange={setLdom} step={0.1} />
+              <NumField label={legacy ? "x₀" : "x₀ [m]"} value={diaphragm} onChange={setDiaphragm} step={0.05} />
+            </div>
+            {cfl > CFL_SAFE && <div className="note" style={{ color: "var(--accent-2)" }}>
+              CFL above {CFL_SAFE} is past the usual MUSCL + RK2 margin; Sod diverges near 0.58.</div>}
+          </Section>
+          <Section title="Display">
+            <Segmented label="Tube field" value={tubeMode} onChange={setTubeMode}
+                       options={[{ value: "density", label: "ρ" }, { value: "schlieren", label: "schl." },
+                                 { value: "pressure", label: "p" }, { value: "temperature", label: "T" }, { value: "Mach", label: "M" }]} />
+            <Toggle checked={overlay} onChange={setOverlay} label="exact Riemann overlay" />
+            <Toggle checked={showDerived} onChange={setShowDerived} label="derived fields" />
+            <Toggle checked={showTracers} onChange={setShowTracers} label="tracer particles" />
+            {bcType === "reflective" && overlay &&
+              <div className="note">The exact solution assumes an infinite tube, so it is hidden with reflective walls.</div>}
+          </Section>
+          <CaseSection onSave={saveCase} onLoad={onLoadCase} onExport={exportCSV} />
+        </aside>
+
+        <main className="main">
+          <Transport player={player} stale={stale} tUnit={si ? { scale: MS, label: "ms" } : null}
+                     onSolve={() => run("solve")} onPlay={() => run("play")}
+                     info={frame ? frame.step + " steps · " + Math.round(player.computeMs) + " ms" : null} />
+          {stale && <div className="note">Parameters changed — press <b>Solve</b> (Enter) to recompute.</div>}
+          {err && <div className="alert">{err}</div>}
+          {player && player.error && <div className="alert">{player.error} Try HLLC / HLL / Rusanov, a lower CFL, or a finer grid.</div>}
+          {hotWarning && <div className="note" style={{ color: "var(--accent-2)" }}>
+            T exceeds {T_WARN} K: real gases dissociate there; this frozen-composition model over-predicts temperature.</div>}
+
+          <section className="stage">
+            <div className="stage-head">
+              <span className="stage-title">Inside the tube</span>
+              <span className="muted">{modeLabel}{showTracers ? " · tracers" : ""}</span>
+              {si && exactSolved && exactSolved.right.kind === "shock" && <span className="muted" style={{ marginLeft: "auto" }}>
+                Ms {sig(exactSolved.right.mach, 3)} · p* {sig(exactSolved.pStar * KPA, 4)} kPa · T₂ {sig(exactSolved.right.T, 4)} K</span>}
+            </div>
+            <div className="stage-body">
+              <TubeView sol={sol} field={field} lo={lo} hi={hi} L={SP ? SP.L : 1}
+                        diaphragm={SP ? SP.diaphragm : 0.5} showDiaphragm={!!frame && frame.t === 0}
+                        tracers={showTracers ? tracers : null} hoverX={hoverX} onHover={setHoverX} />
+            </div>
+            <div className="stage-foot">
+              <Colorbar lo={lo} hi={hi} label={modeLabel} />
+              <Probe items={probe} where={where} />
+            </div>
+          </section>
+
+          {sol && (
+            <div className="plots">
+              {plot(si ? "density ρ [kg/m³]" : "density ρ", "rho")}
+              {plot(si ? "velocity u [m/s]" : "velocity u", "u")}
+              {plot(si ? "pressure p [kPa]" : "pressure p", "p", si ? KPA : 1)}
+              {plot(si ? "temperature T [K]" : "temperature T = p/ρ", "T")}
+              {showDerived && plot("Mach number M", "M")}
+              {showDerived && plot(si ? "internal energy e − e(298 K) [kJ/kg]" : "internal energy e", "e", si ? KPA : 1)}
+              {showDerived && plot(si ? "entropy s [J/(kg·K)]" : "entropy s = ln(p/ρ^γ)", "s")}
+              {showDerived && plot(si ? "sound speed a [m/s]" : "sound speed a", "a")}
+              {showDerived && si && plot("ratio of specific heats γ", "gamma")}
+              {sol.Y && plot("driver-gas mass fraction Y", "Y")}
+            </div>
+          )}
+          <footer className="note">∂U/∂t + ∂F(U)/∂x = 0 · U = [ρ, ρu, E (, ρY)] · p = ρRT · finite volume</footer>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// xShock: exact quasi-1D shock position, drawn as a dotted line.
+function NozzleView({ sol, field, lo, hi, geom, hoverX, onHover, xThroat, xShock }) {
+  const geo = useRef(null);
+  const ref = useCanvas((ctx, W, H) => {
+    ctx.fillStyle = THEME.stage; ctx.fillRect(0, 0, W, H);
+    if (!sol || !geom) return;
+    const { L, type } = geom;
+    const padX = 16, padY = 16, padB = 22;
+    const pw = W - 2 * padX, ph = H - padY - padB, cy = padY + ph / 2;
+    geo.current = { padX, pw, L };
+    let Amax = 0;
+    for (let k = 0; k <= 200; k++) Amax = Math.max(Amax, geom.geom.A((k / 200) * L));
+    const halfAt = x => (geom.geom.A(Math.max(0, Math.min(L, x))) / Amax) * (ph / 2);
+    const SAMPLES = 160;
+    const outline = c => {
+      c.beginPath();
+      for (let k = 0; k <= SAMPLES; k++) { const x = (k / SAMPLES) * L; c.lineTo(padX + (x / L) * pw, cy - halfAt(x)); }
+      for (let k = SAMPLES; k >= 0; k--) { const x = (k / SAMPLES) * L; c.lineTo(padX + (x / L) * pw, cy + halfAt(x)); }
+      c.closePath();
+    };
+    drawFieldStrip(ctx, field, lo, hi, padX, padY, pw, ph, outline);
+    ctx.save(); outline(ctx); ctx.clip();
+    const g = ctx.createLinearGradient(0, padY, 0, padY + ph);
+    g.addColorStop(0, "rgba(0,0,0,0.25)"); g.addColorStop(0.5, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.25)");
+    ctx.fillStyle = g; ctx.fillRect(padX, padY, pw, ph);
+    ctx.restore();
+
+    ctx.strokeStyle = THEME.wall; ctx.lineWidth = 2;
+    for (const sign of [-1, 1]) {
+      ctx.beginPath();
+      for (let k = 0; k <= SAMPLES; k++) { const x = (k / SAMPLES) * L; ctx.lineTo(padX + (x / L) * pw, cy + sign * halfAt(x)); }
+      ctx.stroke();
+    }
+    if (hoverX != null) {
+      const hx = Math.round(padX + (hoverX / L) * pw) + 0.5, hh = halfAt(hoverX);
+      ctx.strokeStyle = THEME.cursor; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(hx, cy - hh - 6); ctx.lineTo(hx, cy + hh + 6); ctx.stroke();
+    }
+    ctx.font = THEME.font; ctx.fillStyle = THEME.tick; ctx.textBaseline = "top";
+    const yLab = padY + ph + 6;
+    ctx.textAlign = "left";   ctx.fillText("inlet · reservoir", padX, yLab);
+    ctx.textAlign = "right";  ctx.fillText("exit · p_b", padX + pw, yLab);
+    if (xThroat != null) {
+      ctx.textAlign = "center"; ctx.fillText("throat", padX + (xThroat / L) * pw, yLab);
+    }
+    if (xShock != null) {
+      const sx = Math.round(padX + (xShock / L) * pw) + 0.5, hh = halfAt(xShock);
+      ctx.strokeStyle = "rgba(255,255,255,0.75)"; ctx.setLineDash([2, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(sx, cy - hh); ctx.lineTo(sx, cy + hh); ctx.stroke(); ctx.setLineDash([]);
+    }
+  }, [sol, field, lo, hi, geom, hoverX, xThroat, xShock]);
+
+  const onMove = e => {
+    const g = geo.current; if (!g) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const f = (e.clientX - r.left - g.padX) / g.pw;
+    onHover(f < 0 || f > 1 ? null : f * g.L);
+  };
+  return <canvas ref={ref} className="stage-canvas" style={{ height: 190 }}
+                 onMouseMove={onMove} onMouseLeave={() => onHover(null)} />;
+}
+
+
+// Steady-state residual for each recorded frame: mean |Δρ| / Δt between frames.
+// Cached per run so it only processes frames it hasn't seen yet.
+function useResiduals(player, runId) {
+  const st = useRef({ run: null, t: [], r: [] });
+  const s = st.current;
+  if (s.run !== runId) { s.run = runId; s.t = []; s.r = []; }
+  if (player && s.t.length + 1 < player.frames.length) {
+    const F = player.frames, t = [], r = [];
+    for (let k = s.t.length + 1; k < F.length; k++) {
+      const a = F[k - 1].snap.rho, b = F[k].snap.rho, dt = F[k].t - F[k - 1].t;
+      let sum = 0;
+      for (let i = 2; i < a.length - 2; i++) sum += Math.abs(b[i] - a[i]);
+      t.push(F[k].t); r.push(sum / (a.length - 4) / Math.max(dt, 1e-300));
+    }
+    s.t = s.t.concat(t); s.r = s.r.concat(r);     // new arrays so memoised plots redraw
+  }
+  return s;
+}
+
+// ============================================================
+// Nozzle workspace
+// ============================================================
+const REGIME_TEXT = {
+  "subsonic": "unchoked, subsonic throughout",
+  "shock": "choked, normal shock in the divergent section",
+  "supersonic": "choked, shock-free supersonic exit",
+  "choked-subsonic": "choked, forced subsonic branch",
+  "choked-supersonic": "choked, forced supersonic branch"
+};
+
+function nzFromPreset(q) {
+  return { gas: q.gas || "ideal", thermo: q.thermo || "thermally-perfect", type: q.type, AR: q.AR, L: q.L,
+           Athroat: q.Athroat || 1e-3, table: null, p0: q.p0, T0: q.T0, pb: q.pb, N: q.N, cfl: q.cfl, tEnd: q.tEnd,
+           gamma: q.gamma || 1.4, branch: q.branch || "auto", bl: null };
+}
+function nzFromCase(c) {
+  const g = c.gas || {}, legacy = typeof g.gamma === "number", geo = c.geometry || {};
+  const table = geo.type === "table" ? { x: geo.x, A: geo.A } : null;
+  return { gas: legacy ? "ideal" : (typeof g === "string" ? g : g.name), thermo: g.model || c.thermo || "thermally-perfect",
+           type: geo.type || "CD", AR: geo.AR || 2, L: table ? table.x[table.x.length - 1] - table.x[0] : geo.L,
+           Athroat: geo.Athroat || 1e-3, table, p0: c.p0, T0: c.T0, pb: c.pb,
+           N: (c.numerics && c.numerics.N) || 300, cfl: (c.numerics && c.numerics.cfl) || 0.4,
+           tEnd: c.tEnd || (c.steady && c.steady.tMax) || 0.01, gamma: legacy ? g.gamma : 1.4, branch: "auto",
+           bl: c.boundaryLayer || null };
+}
+const BL_DEFAULTS = { geometry: "channel", span: 0.1, nWalls: 2, theta0: 0 };
+const MM = 1e3;
+// y(x) on another grid, linear (for overlaying a solution computed on its own stations)
+function resample(X, Y, xs) {
+  let k = 1;
+  return xs.map(x => {
+    while (k < X.length - 1 && X[k] < x) k++;
+    while (k > 1 && X[k - 1] > x) k--;
+    const w = Math.max(0, Math.min(1, (x - X[k - 1]) / (X[k] - X[k - 1])));
+    return Y[k - 1] + w * (Y[k] - Y[k - 1]);
+  });
+}
+
+function NozzleApp({ onHelp, initialCase, onLoadCase }) {
+  const init = useMemo(() => (initialCase ? nzFromCase(initialCase) : nzFromPreset(NOZZLE_PRESETS["Choked CD"])), []);
+  const [preset, setPreset]     = useState(initialCase ? (initialCase.name || null) : "Choked CD");
+  const [gas, setGas]           = useState(init.gas);
+  const [thermo, setThermo]     = useState(init.thermo);
+  const [nozzType, setNozzType] = useState(init.type);
+  const [AR, setAR]             = useState(init.AR);
+  const [Ldom, setLdom]         = useState(init.L);
+  const [Athroat, setAthroat]   = useState(init.Athroat);
+  const [table, setTable]       = useState(init.table);
+  const [p0, setP0]             = useState(init.p0);
+  const [T0, setT0]             = useState(init.T0);
+  const [pb, setPb]             = useState(init.pb);
+  const [N, setN]               = useState(init.N);
+  const [gamma, setGamma]       = useState(init.gamma);
+  const [cfl, setCfl]           = useState(init.cfl);
+  const [tEnd, setTEnd]         = useState(init.tEnd);
+  const [flux, setFlux]         = useState("HLLC");
+  const [viewMode, setViewMode] = useState("Mach");
+  const [branch, setBranch]     = useState(init.branch);
+  const [showIso, setShowIso]   = useState(true);
+  const [measured, setMeasured] = useState(null);       // { name, pts: [{x, y}] } p/p0 vs x
+  const [blOn, setBlOn]         = useState(!!init.bl);
+  const [bl, setBl]             = useState(Object.assign({}, BL_DEFAULTS, init.bl || {}));
+  const [viscous, setViscous]   = useState(null);       // { key, result } or { key, pass } while coupling
+  const [blErr, setBlErr]       = useState(null);
+  const [hoverX, setHoverX]     = useState(null);
+  const [err, setErr]           = useState(null);
+
+  const [player, startPlayer] = usePlayer();
+  const solved = useRef({ key: null, spec: null, meta: null, run: 0 });
+
+  const legacy = gas === "ideal";
+  const spec = useMemo(() => ({ legacy, gas: legacy ? null : gas, thermo, type: nozzType, AR, L: Ldom, Athroat,
+                                table: nozzType === "table" ? table : null, p0, T0, pb, N, cfl, tEnd, flux, gamma }),
+                       [legacy, gas, thermo, nozzType, AR, Ldom, Athroat, table, p0, T0, pb, N, cfl, tEnd, flux, gamma]);
+  const stale = !!player && solved.current.key !== JSON.stringify(spec);
+
+  const buildParams = S => {
+    const P = { type: S.type, AR: S.AR, L: S.L, p0: S.p0, T0: S.T0, pb: S.pb, N: S.N, cfl: S.cfl, flux: S.flux };
+    if (S.table) P.areaTable = S.table;
+    if (S.legacy) P.gamma = S.gamma; else { P.gas = gasModel(S.gas, S.thermo); P.Athroat = S.Athroat; }
+    return P;
+  };
+  const validate = S => {
+    if (S.type === "table" && !S.table)  return "Load an area-profile CSV (x, A) for a tabulated nozzle.";
+    if (S.type !== "table" && !(S.AR >= 1)) return "Area ratio must be ≥ 1.";
+    if (!(S.p0 > 0 && S.T0 > 0))         return "Reservoir p₀ and T₀ must be positive.";
+    if (!(S.pb > 0 && S.pb <= S.p0))     return "Back pressure must be in (0, p₀].";
+    if (S.legacy && !(S.gamma > 1))      return "γ must be greater than 1.";
+    if (!(S.cfl > 0 && S.cfl <= 0.9))    return "CFL must be in (0, 0.9].";
+    if (!(S.N >= 20 && S.N <= 2000))     return "N must be between 20 and 2000.";
+    if (!(S.tEnd > 0) || (S.type !== "table" && !(S.L > 0))) return "t_end and L must be positive.";
+    return null;
+  };
+
+  const run = (mode, S) => {
+    S = S || spec;
+    const e = validate(S); setErr(e); if (e) return;
+    const rec = solved.current = { key: JSON.stringify(S), spec: S, meta: null, run: solved.current.run + 1 };
+    const P = buildParams(S);
+    startPlayer({
+      tEnd: S.tEnd, maxFrames: 300, playSeconds: 8,
+      init: () => { const s = initNozzleState(P); rec.meta = s; return s; },
+      advance: (s, t) => nozzleStepUntil(s, t),
+      stableDt,
+      record: recordConserved,
+      check: check1D
+    }, mode);
+  };
+
+  const applyState = q => {
+    setGas(q.gas); setThermo(q.thermo); setNozzType(q.type); setAR(q.AR); setLdom(q.L); setAthroat(q.Athroat);
+    setTable(q.table); setP0(q.p0); setT0(q.T0); setPb(q.pb); setN(q.N); setCfl(q.cfl); setTEnd(q.tEnd);
+    setGamma(q.gamma); setBranch(q.branch);
+    setBlOn(!!q.bl); setBl(Object.assign({}, BL_DEFAULTS, q.bl || {}));
+  };
+  const loadPreset = name => {
+    const q = nzFromPreset(NOZZLE_PRESETS[name]);
+    setPreset(name); applyState(q);
+    run("solve", { legacy: q.gas === "ideal", gas: q.gas === "ideal" ? null : q.gas, thermo: q.thermo, type: q.type, AR: q.AR,
+                   L: q.L, Athroat: q.Athroat, table: null, p0: q.p0, T0: q.T0, pb: q.pb, N: q.N, cfl: q.cfl,
+                   tEnd: q.tEnd, flux, gamma: q.gamma });
+  };
+  const switchGas = v => {
+    // keep the numbers sensible when crossing between non-dimensional and SI
+    if ((v === "ideal") !== legacy) {
+      if (v === "ideal") { setP0(1); setT0(1); setPb(0.75); setLdom(1); setTEnd(15); }
+      else { setP0(3e5); setT0(300); setPb(1e5); setLdom(0.5); setTEnd(0.006); }
+    }
+    setGas(v);
+  };
+
+  const loadArea = () => pickTextFile(".csv,.txt,.dat").then(f => {
+    const rows = numericTable(f.text);
+    if (rows.length < 2) throw new Error(f.name + ": no numeric (x, A) rows found");
+    const x = rows.map(r => r[0]), A = rows.map(r => r[1]);
+    makeAreaTable(x, A);                               // validates (monotone x, positive A)
+    setTable({ x, A, name: f.name }); setNozzType("table"); setLdom(x[x.length - 1] - x[0]); setErr(null);
+  }).catch(e => setErr(e.message));
+  const loadMeasured = () => pickTextFile(".csv,.txt,.dat").then(f => {
+    const rows = numericTable(f.text);
+    if (!rows.length) throw new Error(f.name + ": no numeric (x, p/p0) rows found");
+    setMeasured({ name: f.name, pts: rows.map(r => ({ x: r[0], y: r[1] })) }); setErr(null);
+  }).catch(e => setErr(e.message));
+
+  useEffect(() => { run("solve"); /* eslint-disable-next-line */ }, []);
+  usePlayerKeys(player, stale, run, onHelp);
+
+  const meta = solved.current.meta;
+  const SP = solved.current.spec;
+  const frame = player ? player.current() : null;
+  const sol = useMemo(() => {
+    if (!frame || !meta) return null;
+    const s = extractNozzle(Object.assign({}, meta, frame.snap));
+    s.pr = s.p.map(v => v / meta.p0); s.ptr = s.pt.map(v => v / meta.p0);
+    return s;
+  }, [frame, meta]);
+  const exact = useMemo(() => {
+    if (!meta) return null;
+    const e = quasi1DSolution(meta, branch);
+    e.pr = e.p.map(v => v / meta.p0); e.ptr = e.pt.map(v => v / meta.p0);
+    return e;
+  }, [meta, branch]);
+  const res = useResiduals(player, solved.current.run);
+
+  // Displacement correction (boundary.js): steady coupled solution for the solved
+  // spec, run in time slices so the page stays responsive.
+  const blKey = meta && blOn && SP && !SP.legacy ? solved.current.run + JSON.stringify(bl) : null;
+  useEffect(() => {
+    setBlErr(null);
+    if (!blKey) { setViscous(null); return; }
+    if (!(bl.theta0 >= 0) || (bl.geometry === "channel" && !(bl.span > 0))) { setBlErr("Span must be positive and θ₀ ≥ 0."); return; }
+    setViscous({ key: blKey, pass: 0 });
+    const gen = viscousQuasi1DGen(buildParams(SP), bl);
+    return runSliced(gen, v => setViscous({ key: blKey, pass: v.step + 1 }),
+                     result => setViscous({ key: blKey, result }),
+                     e => { setViscous(null); setBlErr(e.message); });
+    /* eslint-disable-next-line */
+  }, [blKey]);
+  const vres = viscous && viscous.key === blKey ? viscous.result : null;
+  const visc = useMemo(() => {
+    if (!vres || !sol) return null;
+    const v = vres.solution, X = v.x, xs = sol.x;
+    return { M: resample(X, v.M, xs), pr: resample(X, v.p, xs).map(q => q / meta.p0), T: resample(X, v.T, xs),
+             rho: resample(X, v.rho, xs), ptr: resample(X, v.pt, xs).map(q => q / meta.p0), mdot: resample(X, v.mdot, xs),
+             dsMM: resample(vres.x, vres.deltaStar, xs).map(q => q * MM), H: resample(vres.bl.x, vres.bl.H, xs) };
+  }, [vres, sol]);
+
+  const field = !sol ? null : viewMode === "pressure" ? sol.p : viewMode === "temp" ? sol.T
+              : viewMode === "density" ? sol.rho : sol.M;
+  const [flo, fhi] = finiteRange([field]);
+  const [lo, hi] = useSmoothRange(flo, fhi, solved.current.run + viewMode);
+
+  const si = SP && !SP.legacy;
+  let probe = null, where = "";
+  if (sol && hoverX != null) {
+    const i = cellAt(hoverX, meta.dx, meta.N);
+    where = "x = " + sig(sol.x[i], 3) + (si ? " m · A = " + sig(sol.A[i] * CM2, 4) + " cm²" : " · A = " + sig(sol.A[i], 3));
+    probe = [["M", sol.M[i]], ["p/p₀", sol.pr[i]], ["T", sol.T[i]], ["ρ", sol.rho[i]], ["p₀/p₀,in", sol.ptr[i]]];
+  }
+
+  // ---- case files ----
+  const toCase = S => {
+    const geometry = S.table ? { type: "table", x: S.table.x, A: S.table.A }
+                             : { type: S.type, AR: S.AR, L: S.L, Athroat: S.legacy ? 1 : S.Athroat };
+    const c = { kind: "nozzle", name: preset || "nozzle", gas: S.legacy ? { gamma: S.gamma } : { name: S.gas, model: S.thermo },
+                geometry, p0: S.p0, T0: S.T0, pb: S.pb, numerics: { N: S.N, cfl: S.cfl, flux: S.flux }, tEnd: S.tEnd };
+    if (blOn && !S.legacy) c.boundaryLayer = Object.assign({}, bl);
+    return c;
+  };
+  const saveCase = () => downloadText(safeName(preset) + ".json", JSON.stringify(toCase(spec), null, 2) + "\n", "application/json");
+  const exportCSV = () => {
+    if (!sol) return;
+    const header = ["case: " + (preset || "nozzle") + " (nozzle)", "t = " + frame.t + " s", "regime (exact): " + (exact ? exact.regime : "")];
+    downloadText(safeName(preset) + "_t=" + frame.t.toExponential(3) + ".csv", fieldsToCSV(sol, { header, si }), "text/csv");
+  };
+
+  const resetKey = solved.current.run;
+  const plot = (title, key, withRef, extra) => (
+    <PlotCard key={key} title={title} x={sol.x} y={sol[key]}
+              refY={withRef && showIso && exact ? exact[key] : null} refLabel="exact quasi-1D"
+              ref2={withRef && visc ? visc[key] : null} ref2Label="+ boundary layer"
+              hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} {...(extra || {})} />
+  );
+  const modeLabel = { Mach: "Mach M", pressure: "pressure p", temp: "temperature T", density: "density ρ" }[viewMode];
+  const last = sol ? sol.x.length - 1 : 0;
+  const pStar = legacy ? Math.pow(2 / (gamma + 1), gamma / (gamma - 1)) : null;
+
+  return (
+    <div className="app">
+      <TopBar active="nozzle" scheme={flux + " · MUSCL–minmod · SSP-RK2"} onHelp={onHelp} />
+      <div className="workspace">
+        <aside className="rail">
+          <p className="rail-intro">
+            A duct fed by a reservoir (p₀, T₀) and exhausting to back pressure p_b. Lower p_b to choke the
+            throat, push a shock into the divergent section, then blow it out.
+          </p>
+          <Section title="Preset">
+            <div className="presets">
+              {Object.keys(NOZZLE_PRESETS).map(name => (
+                <button key={name} className={"preset" + (preset === name ? " on" : "")}
+                        onClick={() => loadPreset(name)}>{name}</button>
+              ))}
+            </div>
+          </Section>
+          <Section title="Gas">
+            <SelectField label="Gas" value={gas} onChange={switchGas} options={GAS_OPTIONS} />
+            {legacy ? <NumField label="γ" value={gamma} onChange={setGamma} step={0.05} />
+                    : <SelectField label="Thermodynamic model" value={thermo} onChange={setThermo} options={THERMO_OPTIONS} />}
+          </Section>
+          <Section title="Geometry">
+            <SelectField label="Type" value={nozzType} onChange={setNozzType}
+                         options={[{ value: "CD", label: "converging–diverging" }, { value: "convergent", label: "convergent" },
+                                   { value: "divergent", label: "divergent" }, { value: "table", label: "tabulated A(x) (CSV)" }]} />
+            {nozzType === "table" ? (
+              <React.Fragment>
+                <button className="btn" onClick={loadArea}>Load area CSV…</button>
+                <div className="note">{table ? (table.name || "table") + ": " + table.x.length + " points, L = " + sig(table.x[table.x.length - 1] - table.x[0], 4) + (si ? " m" : "")
+                                             : "Two columns: x, A (header lines are skipped). Interpolated with monotone cubics."}</div>
+              </React.Fragment>
+            ) : (
+              <div className="grid-3">
+                <NumField label="A_max/A_t" value={AR} onChange={setAR} step={0.1} />
+                <NumField label={si ? "L [m]" : "L"} value={Ldom} onChange={setLdom} step={0.1} />
+                {!legacy && <NumField label="A_t [cm²]" value={+(Athroat * CM2).toPrecision(8)} onChange={v => setAthroat(v / CM2)} step={1} />}
+              </div>
+            )}
+          </Section>
+          <Section title="Boundary conditions" aside={"p_b/p₀ " + (pb / Math.max(p0, 1e-9)).toFixed(3)}>
+            {legacy ? (
+              <div className="grid-3">
+                <NumField label="p₀" value={p0} onChange={setP0} step={0.05} />
+                <NumField label="T₀" value={T0} onChange={setT0} step={0.05} />
+                <NumField label="p_b" value={pb} onChange={setPb} step={0.01} />
+              </div>
+            ) : (
+              <div className="grid-3">
+                <NumField label="p₀ [kPa]" value={+(p0 * KPA).toPrecision(8)} onChange={v => setP0(v / KPA)} step={10} />
+                <NumField label="T₀ [K]" value={T0} onChange={setT0} step={10} />
+                <NumField label="p_b [kPa]" value={+(pb * KPA).toPrecision(8)} onChange={v => setPb(v / KPA)} step={5} />
+              </div>
+            )}
+            {exact && <div className="note">Choked-flow limits for this duct: p_b/p₀ below {sig(exact.pSubExit / meta.p0, 4)} chokes;
+              below {sig(exact.pShockAtExit / meta.p0, 4)} the shock leaves the nozzle; design point {sig(exact.pSupExit / meta.p0, 4)}.</div>}
+            {pStar && <div className="note">Sonic throat at p*/p₀ = {pStar.toFixed(4)}.</div>}
+          </Section>
+          <Section title="Numerics">
+            <SelectField label="Riemann flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />
+            <div className="grid-3">
+              <NumField label="N cells" value={N} onChange={v => setN(Math.round(v))} step={50} />
+              <NumField label="CFL" value={cfl} onChange={setCfl} step={0.05} />
+              {legacy ? <NumField label="t end" value={tEnd} onChange={setTEnd} step={1} />
+                      : <NumField label="t end [ms]" value={+(tEnd * MS).toPrecision(8)} onChange={v => setTEnd(v / MS)} step={1} />}
+            </div>
+            {cfl > CFL_SAFE && <div className="note" style={{ color: "var(--accent-2)" }}>
+              CFL above {CFL_SAFE} is past the usual MUSCL + RK2 margin.</div>}
+          </Section>
+          <Section title="Display">
+            <Segmented label="Duct field" value={viewMode} onChange={setViewMode}
+                       options={[{ value: "Mach", label: "M" }, { value: "pressure", label: "p" },
+                                 { value: "temp", label: "T" }, { value: "density", label: "ρ" }]} />
+            <Toggle checked={showIso} onChange={setShowIso} label="exact quasi-1D overlay" />
+            <SelectField label="Reference regime" value={branch} onChange={setBranch}
+                         options={[{ value: "auto", label: "auto (from p_b): exact incl. normal shock" },
+                                   { value: "subsonic", label: "force choked, subsonic branch" },
+                                   { value: "supersonic", label: "force choked, supersonic branch" }]} />
+          </Section>
+          {!legacy && (
+            <Section title="Boundary layer" aside={blOn ? "displacement" : "off"}>
+              <Toggle checked={blOn} onChange={setBlOn} label="displacement correction (turbulent, integral)" />
+              {blOn && (
+                <React.Fragment>
+                  <SelectField label="Cross-section" value={bl.geometry} onChange={v => setBl(Object.assign({}, bl, { geometry: v }))}
+                               options={[{ value: "channel", label: "channel: A = span × height" },
+                                         { value: "axisymmetric", label: "axisymmetric: A = πr²" }]} />
+                  <div className="grid-3">
+                    {bl.geometry === "channel" && <NumField label="span [cm]" value={+(bl.span * 100).toPrecision(8)} onChange={v => setBl(Object.assign({}, bl, { span: v / 100 }))} step={1} />}
+                    {bl.geometry === "channel" && <NumField label="walls" value={bl.nWalls} onChange={v => setBl(Object.assign({}, bl, { nWalls: Math.max(1, Math.min(2, Math.round(v))) }))} step={1} />}
+                    <NumField label="θ₀ inlet [mm]" value={+(bl.theta0 * MM).toPrecision(8)} onChange={v => setBl(Object.assign({}, bl, { theta0: v / MM }))} step={0.1} />
+                  </div>
+                  <div className="note">
+                    {blErr ? <span style={{ color: "var(--accent-2)" }}>{blErr}</span>
+                     : !vres ? (viscous ? "Coupling… pass " + (viscous.pass || 0) : "Solve to couple.")
+                     : (vres.reliable ? "Converged" : vres.separated ? "Boundary layer separates: shock position not a reliable prediction"
+                                                    : "No steady attached state matches p_b")
+                       + (vres.xShock != null ? " · shock at x = " + sig(vres.xShock, 4) + " m (inviscid " + sig(vres.xShockInviscid, 4) + ")" : "")
+                       + " · ṁ " + sig(vres.solution.mdot[0], 4) + " kg/s."}
+                  </div>
+                  <div className="note">Teal dashed curves: exact quasi-1D on A − δ*. θ₀ is the momentum thickness entering the duct — usually unknown; vary it.</div>
+                </React.Fragment>
+              )}
+            </Section>
+          )}
+          <Section title="Measured data">
+            <div className="grid-2">
+              <button className="btn" onClick={loadMeasured}>Load p/p₀ CSV…</button>
+              <button className="btn" onClick={() => setMeasured(null)} disabled={!measured}>Clear</button>
+            </div>
+            <div className="note">{measured ? measured.name + ": " + measured.pts.length + " points on the p/p₀ plot"
+                                            : "Two columns: x (same units as the duct), p/p₀. Shown as markers on the p/p₀ plot."}</div>
+          </Section>
+          <CaseSection onSave={saveCase} onLoad={onLoadCase} onExport={exportCSV} />
+        </aside>
+
+        <main className="main">
+          <Transport player={player} stale={stale} tUnit={si ? { scale: MS, label: "ms" } : null}
+                     onSolve={() => run("solve")} onPlay={() => run("play")}
+                     info={frame ? frame.step + " steps · " + Math.round(player.computeMs) + " ms" : null} />
+          {stale && <div className="note">Parameters changed — press <b>Solve</b> (Enter) to recompute.</div>}
+          {err && <div className="alert">{err}</div>}
+          {player && player.error && <div className="alert">{player.error} Try HLLC / HLL / Rusanov or a lower CFL.</div>}
+
+          <section className="stage">
+            <div className="stage-head">
+              <span className="stage-title">{nozzType === "CD" ? "Converging–diverging nozzle" : nozzType === "table" ? "Tabulated duct" : nozzType + " nozzle"}</span>
+              <span className="muted">{modeLabel}</span>
+              {sol && <span className="muted" style={{ marginLeft: "auto" }}>
+                exit M {sig(sol.M[last], 3)} · ṁ {sig(sol.mdot[last], 4)}{si ? " kg/s" : ""}
+                {exact ? " · exact: " + REGIME_TEXT[exact.regime] + (exact.xShock != null ? " at x = " + sig(exact.xShock, 4) : "") : ""}</span>}
+            </div>
+            <div className="stage-body">
+              <NozzleView sol={sol} field={field} lo={lo} hi={hi} geom={meta} hoverX={hoverX} onHover={setHoverX}
+                          xThroat={exact ? exact.xThroat : null} xShock={exact && showIso ? exact.xShock : null} />
+            </div>
+            <div className="stage-foot">
+              <Colorbar lo={lo} hi={hi} label={modeLabel} />
+              <Probe items={probe} where={where} />
+            </div>
+          </section>
+
+          {sol && (
+            <div className="plots">
+              {plot("Mach number M", "M", true)}
+              {plot("pressure ratio p/p₀", "pr", true, measured ? { points: measured.pts, pointsLabel: "measured" } : null)}
+              {plot(si ? "temperature T [K]" : "temperature T", "T", true)}
+              {plot(si ? "density ρ [kg/m³]" : "density ρ", "rho", true)}
+              {plot("total-pressure ratio p₀/p₀,in", "ptr", true)}
+              {plot(si ? "mass flow ṁ = ρuA [kg/s]" : "mass flow ṁ = ρuA", "mdot", true)}
+              {visc && (
+                <PlotCard key="ds" title="displacement thickness δ* [mm] (per wall)" x={sol.x} y={visc.dsMM}
+                          hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
+              )}
+              {visc && (
+                <PlotCard key="H" title={"shape factor H" + (vres.separated ? " · separates" : "")} x={sol.x} y={visc.H}
+                          hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
+              )}
+              {res.t.length > 1 && (
+                <PlotCard wide title="convergence · mean |Δρ| / Δt (log scale)" x={res.t} y={res.r} logY
+                          hoverX={frame ? frame.t : null} resetKey={resetKey} />
+              )}
+            </div>
+          )}
+          <footer className="note">∂U/∂t + ∂F/∂x = H · H = −(A′/A)[ρu, ρu², u(E+p)] · reservoir inlet (p₀, T₀), back-pressure exit</footer>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Shock-tube facility workspace
+// ============================================================
+const XT_FIELDS = {
+  logp: { label: "log pressure", get: q => Math.log10(Math.max(q.p, 1e-12)) },
+  T:    { label: "temperature",  get: q => q.T },
+  logrho: { label: "log density", get: (q, rho) => Math.log10(Math.max(rho, 1e-30)) },
+  Y:    { label: "driver gas fraction", get: (q, rho, Y) => Y }
+};
+const XT_PAD = { l: 48, r: 12, t: 10, b: 30 };
+
+// x–t diagram: one image row per recorded frame (time upward), coloured by a
+// field of the two-gas simulation, with the analytic wave paths overlaid.
+// Rows are computed once per frame and cached; the colour range is fixed from
+// the analysis so earlier rows never need recolouring.
+function XTDiagram({ player, meta, analysis, fieldKey, range, L4, L1, runId, cursorT, onSeek }) {
+  const cache = useRef({ run: null, field: null, rows: 0, off: null, img: null });
+  const [hover, setHover] = useState(null);
+  const c = cache.current;
+  const F = player ? player.frames : [];
+  const nRows = player ? player.maxFrames + 1 : 1;
+  if (meta && (c.run !== runId || c.field !== fieldKey)) {
+    c.run = runId; c.field = fieldKey; c.rows = 0;
+    c.off = document.createElement("canvas"); c.off.width = meta.N; c.off.height = nRows;
+    c.img = c.off.getContext("2d").createImageData(meta.N, 1);
+  }
+  if (meta && c.off) {
+    const octx = c.off.getContext("2d"), d = c.img.data, f = XT_FIELDS[fieldKey], inv = 1 / Math.max(range[1] - range[0], 1e-12);
+    for (let k = c.rows; k < F.length; k++) {
+      const s = F[k].snap;
+      for (let i = 0; i < meta.N; i++) {
+        const j = i + 2, rY = s.rY ? s.rY[j] : undefined;
+        const q = meta.eos.prim(s.rho[j], s.mom[j], s.ene[j], rY);
+        const v = f.get(q, s.rho[j], rY != null ? rY / s.rho[j] : 0);
+        const m = 3 * Math.max(0, Math.min(255, Math.round((v - range[0]) * inv * 255)));
+        d[4 * i] = CMAP[m]; d[4 * i + 1] = CMAP[m + 1]; d[4 * i + 2] = CMAP[m + 2]; d[4 * i + 3] = 255;
+      }
+      octx.putImageData(c.img, 0, nRows - 1 - Math.min(nRows - 1, k));   // time upward
+    }
+    c.rows = F.length;
+  }
+  const tEnd = player ? player.tEnd : 1;
+  const geo = useRef(null);
+  const ref = useCanvas((ctx, W, H) => {
+    ctx.fillStyle = THEME.stage; ctx.fillRect(0, 0, W, H);
+    const pw = W - XT_PAD.l - XT_PAD.r, ph = H - XT_PAD.t - XT_PAD.b;
+    geo.current = { pw, ph };
+    if (pw <= 0 || ph <= 0) return;
+    const X = x => XT_PAD.l + ((x + L4) / (L4 + L1)) * pw, Tt = t => XT_PAD.t + (1 - t / tEnd) * ph;
+    if (c.off) {
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(c.off, XT_PAD.l, XT_PAD.t, pw, ph);
+    }
+    // analytic wave paths
+    if (analysis) {
+      ctx.save(); ctx.beginPath(); ctx.rect(XT_PAD.l, XT_PAD.t, pw, ph); ctx.clip();
+      for (const ln of analysis.lines) {
+        ctx.strokeStyle = "rgba(255,255,255,0.85)"; ctx.lineWidth = ln.kind === "shock" ? 1.5 : 1.1;
+        ctx.setLineDash(ln.kind === "contact" ? [6, 4] : ln.kind === "fan" ? [1.5, 3] : []);
+        ctx.beginPath();
+        ln.pts.forEach((p, i) => (i ? ctx.lineTo(X(p.x), Tt(p.t)) : ctx.moveTo(X(p.x), Tt(p.t))));
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      // test window at the end wall
+      const ty0 = Tt(analysis.times.shockAtWall), ty1 = Tt(analysis.times.testEnd);
+      ctx.fillStyle = "rgba(215,163,60,0.9)"; ctx.fillRect(X(L1) - 4, ty1, 4, ty0 - ty1);
+      ctx.restore();
+    }
+    // playback cursor
+    if (cursorT != null) {
+      const y = Math.round(Tt(cursorT)) + 0.5;
+      ctx.strokeStyle = THEME.cursor; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(XT_PAD.l, y); ctx.lineTo(XT_PAD.l + pw, y); ctx.stroke();
+    }
+    if (hover) {
+      ctx.strokeStyle = "rgba(255,255,255,0.4)"; ctx.setLineDash([2, 3]);
+      ctx.beginPath(); ctx.moveTo(X(hover.x), XT_PAD.t); ctx.lineTo(X(hover.x), XT_PAD.t + ph); ctx.stroke(); ctx.setLineDash([]);
+    }
+    // axes
+    ctx.strokeStyle = THEME.axis; ctx.strokeRect(XT_PAD.l + 0.5, XT_PAD.t + 0.5, pw - 1, ph - 1);
+    ctx.fillStyle = THEME.tick; ctx.font = THEME.font;
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (const v of niceTicks(-L4, L1, 6)) ctx.fillText(String(+v.toFixed(3)), X(v), XT_PAD.t + ph + 5);
+    ctx.fillText("x [m]   (diaphragm at 0, end wall at " + L1 + ")", XT_PAD.l + pw / 2, XT_PAD.t + ph + 17);
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (const v of niceTicks(0, tEnd * MS, 5)) ctx.fillText(String(+v.toFixed(3)), XT_PAD.l - 6, Tt(v / MS));
+    ctx.save(); ctx.translate(12, XT_PAD.t + ph / 2); ctx.rotate(-Math.PI / 2); ctx.textAlign = "center";
+    ctx.fillText("t [ms]", 0, 0); ctx.restore();
+  }, [F.length, analysis, cursorT, hover, L4, L1, tEnd, fieldKey, runId]);
+
+  const toXT = e => {
+    const g = geo.current; if (!g) return null;
+    const r = e.currentTarget.getBoundingClientRect();
+    const fx = (e.clientX - r.left - XT_PAD.l) / g.pw, fy = (e.clientY - r.top - XT_PAD.t) / g.ph;
+    if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
+    return { x: -L4 + fx * (L4 + L1), t: (1 - fy) * tEnd };
+  };
+  return (
+    <div>
+      <canvas ref={ref} className="stage-canvas" style={{ height: "min(56vh, 520px)" }}
+              onMouseMove={e => setHover(toXT(e))} onMouseLeave={() => setHover(null)}
+              onClick={e => { const p = toXT(e); if (p) onSeek(p.t); }} />
+      <div className="stage-foot">
+        <span className="xt-legend"><i className="ln-shock" />shock <i className="ln-contact" />contact <i className="ln-fan" />expansion
+          <i className="ln-test" />test window (analysis) · click to jump to a time</span>
+        <span className="muted">{hover ? "x = " + sig(hover.x, 3) + " m · t = " + sig(hover.t * MS, 3) + " ms" : ""}</span>
+      </div>
+    </div>
+  );
+}
+
+const FAC_TABLE_ROWS = [
+  ["p", "p [kPa]", v => sig(v * KPA, 4)], ["T", "T [K]", v => sig(v, 4)], ["rho", "ρ [kg/m³]", v => sig(v, 4)],
+  ["u", "u [m/s]", v => sig(v, 4)], ["a", "a [m/s]", v => sig(v, 4)], ["gamma", "γ", v => sig(v, 4)]
+];
+
+function facFromCase(c) {
+  const n = c.numerics || {};
+  return { driver: c.driver, driven: c.driven, thermo: c.thermo || "thermally-perfect", p4: c.p4, T4: c.T4, p1: c.p1, T1: c.T1,
+           L4: c.L4, L1: c.L1, N: n.N || 600, cfl: n.cfl || 0.4, flux: n.flux || "HLLC" };
+}
+
+function FacilityApp({ onHelp, initialCase, onLoadCase }) {
+  const firstPreset = Object.keys(FACILITY_PRESETS)[0];
+  const init = useMemo(() => initialCase ? facFromCase(initialCase)
+    : Object.assign({ thermo: "thermally-perfect", N: 600, cfl: 0.4, flux: "HLLC" }, FACILITY_PRESETS[firstPreset]), []);
+  const [preset, setPreset] = useState(initialCase ? (initialCase.name || null) : firstPreset);
+  const [driver, setDriver] = useState(init.driver);
+  const [driven, setDriven] = useState(init.driven);
+  const [thermo, setThermo] = useState(init.thermo);
+  const [p4, setP4] = useState(init.p4);
+  const [T4, setT4] = useState(init.T4);
+  const [p1, setP1] = useState(init.p1);
+  const [T1, setT1] = useState(init.T1);
+  const [L4, setL4] = useState(init.L4);
+  const [L1, setL1] = useState(init.L1);
+  const [N, setN] = useState(init.N);
+  const [cfl, setCfl] = useState(init.cfl);
+  const [flux, setFlux] = useState(init.flux);
+  const [MsTarget, setMsTarget] = useState(3);
+  const [xtField, setXtField] = useState("logp");
+  const [hoverX, setHoverX] = useState(null);
+  const [err, setErr] = useState(null);
+
+  const [player, startPlayer] = usePlayer();
+  const solved = useRef({ key: null, spec: null, run: 0, analysis: null });
+
+  const spec = useMemo(() => ({ driver, driven, thermo, p4, T4, p1, T1, L4, L1, N, cfl, flux }),
+                       [driver, driven, thermo, p4, T4, p1, T1, L4, L1, N, cfl, flux]);
+  const stale = !!player && solved.current.key !== JSON.stringify(spec);
+
+  // Live analysis of the current inputs (cheap: a handful of Riemann solves).
+  const live = useMemo(() => {
+    try {
+      if (!(p4 > p1 && p1 > 0 && T1 > 0 && T4 > 0 && L4 > 0 && L1 > 0)) throw new Error("Need p4 > p1 > 0, positive temperatures and lengths.");
+      return { a: facilityAnalysis(spec) };
+    } catch (e) { return { error: e.message }; }
+  }, [spec]);
+
+  const run = (mode, S) => {
+    S = S || spec;
+    let a;
+    try { a = facilityAnalysis(S); } catch (e) { setErr(e.message); return; }
+    if (!(S.N >= 50 && S.N <= 3000)) { setErr("N must be between 50 and 3000."); return; }
+    if (!(S.cfl > 0 && S.cfl <= 0.9)) { setErr("CFL must be in (0, 0.9]."); return; }
+    setErr(null);
+    solved.current = { key: JSON.stringify(S), spec: S, run: solved.current.run + 1, analysis: a };
+    const P = facilitySimParams(S, S.N, { cfl: S.cfl, flux: S.flux });
+    const tEnd = Number.isFinite(a.times.testEnd) ? a.times.testEnd + 0.3 * a.times.testTime : 3 * a.times.shockAtWall;
+    startPlayer({
+      tEnd, maxFrames: 240, playSeconds: 8,
+      init: () => initState(P),
+      advance: (s, t) => stepUntil(s, t),
+      stableDt, record: recordConserved, check: check1D
+    }, mode);
+  };
+  const loadPreset = name => {
+    const q = FACILITY_PRESETS[name];
+    setPreset(name); setDriver(q.driver); setDriven(q.driven); setP4(q.p4); setT4(q.T4); setP1(q.p1); setT1(q.T1); setL4(q.L4); setL1(q.L1);
+    run("solve", Object.assign({}, spec, q));
+  };
+  const designP4 = () => {
+    const v = facilityDesignP4(spec, MsTarget);
+    if (v == null) { setErr("Ms = " + MsTarget + " is out of reach with this driver gas (even at p4/p1 = 10¹²)."); return; }
+    setErr(null); setP4(Math.round(v)); setPreset(null);
+  };
+
+  useEffect(() => { run("solve"); /* eslint-disable-next-line */ }, []);
+  usePlayerKeys(player, stale, run, onHelp);
+
+  const SP = solved.current.spec, A = solved.current.analysis;
+  const frame = player ? player.current() : null;
+  const meta = useMemo(() => (player && player.sim ? player.sim : null), [player]);
+  const sol = useMemo(() => {
+    if (!frame || !meta) return null;
+    const s = extract(Object.assign({}, meta, frame.snap));
+    s.xs = s.x.map(x => x - SP.L4);              // diaphragm at x = 0
+    return s;
+  }, [frame, meta]);
+
+  // End-wall histories from the recorded frames (cached per run).
+  const hist = useRef({ run: null, t: [], p: [], T: [] });
+  const H = hist.current;
+  if (H.run !== solved.current.run) { H.run = solved.current.run; H.t = []; H.p = []; H.T = []; }
+  if (player && meta && H.t.length < player.frames.length) {
+    // new arrays (not push) so memoised plots see the change
+    const t = [], p = [], T = [];
+    for (let k = H.t.length; k < player.frames.length; k++) {
+      const s = player.frames[k].snap, j = meta.N + 1;
+      const q = meta.eos.prim(s.rho[j], s.mom[j], s.ene[j], s.rY ? s.rY[j] : undefined);
+      t.push(player.frames[k].t * MS); p.push(q.p); T.push(q.T);
+    }
+    H.t = H.t.concat(t); H.p = H.p.concat(p); H.T = H.T.concat(T);
+  }
+  const histRef = key => {   // recomputed per render: a new array each time H.t changes
+    if (!A) return null;
+    const tW = A.times.shockAtWall * MS, tE = A.times.testEnd * MS;
+    const before = key === "p" ? A.states[1].p : A.states[1].T, during = key === "p" ? A.states[5].p : A.states[5].T;
+    return H.t.map(t => (t < tW ? before : t <= tE ? during : NaN));
+  };
+
+  const xtRange = useMemo(() => {
+    if (!A) return [0, 1];
+    const s = A.states, ps = [s[1].p, s[3].p, s[4].p, s[5].p], Ts = [s[1].T, s[3].T, s[4].T, s[5].T];
+    const rhos = [s[1].rho, s[3].rho, s[4].rho, s[5].rho];
+    if (xtField === "logp") return [Math.log10(Math.min(...ps) * 0.8), Math.log10(Math.max(...ps) * 1.3)];
+    if (xtField === "logrho") return [Math.log10(Math.min(...rhos) * 0.8), Math.log10(Math.max(...rhos) * 1.3)];
+    if (xtField === "T") return [Math.min(...Ts) * 0.9, Math.max(...Ts) * 1.1];
+    return [0, 1];
+  }, [A, xtField]);
+
+  const saveCase = () => downloadText(safeName(preset || "facility") + ".json", JSON.stringify({
+    kind: "facility", name: preset || "facility", driver, driven, thermo, p4, T4, p1, T1, L4, L1,
+    simulate: true, numerics: { N, cfl, flux }, output: { probes: [L4 + L1 - 1e-3] } }, null, 2) + "\n", "application/json");
+  const exportCSV = () => {
+    if (!sol) return;
+    const header = ["case: " + (preset || "facility") + " (facility simulation)", "t = " + frame.t + " s",
+                    "x measured from the driver end wall; diaphragm at x = " + SP.L4 + " m"];
+    downloadText(safeName(preset || "facility") + "_t=" + frame.t.toExponential(3) + ".csv", fieldsToCSV(sol, { header }), "text/csv");
+  };
+  const exportHistory = () => downloadText(safeName(preset || "facility") + "_endwall.csv",
+    tableToCSV(H.t.map((t, k) => ({ t_ms: t, p_Pa: H.p[k], T_K: H.T[k] }))), "text/csv");
+
+  const la = live.a;
+  const resetKey = solved.current.run;
+  const tubePlot = (title, key, scale) => (
+    <PlotCard key={key} title={title} x={sol.xs} y={sol[key]} yScale={scale} hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
+  );
+
+  return (
+    <div className="app">
+      <TopBar active="facility" scheme={"two-gas " + flux + " · MUSCL–minmod · SSP-RK2"} onHelp={onHelp} />
+      <div className="workspace">
+        <aside className="rail">
+          <p className="rail-intro">
+            Design a reflected-shock tube: pick driver and driven gases and fill pressures, then read the
+            incident and reflected shock conditions and the test time. The two-gas simulation draws the full x–t diagram.
+          </p>
+          <Section title="Preset">
+            <div className="presets">
+              {Object.keys(FACILITY_PRESETS).map(name => (
+                <button key={name} className={"preset" + (preset === name ? " on" : "")} onClick={() => loadPreset(name)}>{name}</button>
+              ))}
+            </div>
+          </Section>
+          <Section title="Driver (4)">
+            <SelectField label="Gas" value={driver} onChange={setDriver} options={REAL_GAS_OPTIONS} />
+            <div className="grid-3">
+              <NumField label="p₄ [kPa]" value={+(p4 * KPA).toPrecision(8)} onChange={v => setP4(v / KPA)} step={10} />
+              <NumField label="T₄ [K]" value={T4} onChange={setT4} step={10} />
+              <NumField label="L₄ [m]" value={L4} onChange={setL4} step={0.5} />
+            </div>
+          </Section>
+          <Section title="Driven / test gas (1)">
+            <SelectField label="Gas" value={driven} onChange={setDriven} options={REAL_GAS_OPTIONS} />
+            <div className="grid-3">
+              <NumField label="p₁ [kPa]" value={+(p1 * KPA).toPrecision(8)} onChange={v => setP1(v / KPA)} step={1} />
+              <NumField label="T₁ [K]" value={T1} onChange={setT1} step={10} />
+              <NumField label="L₁ [m]" value={L1} onChange={setL1} step={0.5} />
+            </div>
+          </Section>
+          <Section title="Design">
+            <SelectField label="Thermodynamic model" value={thermo} onChange={setThermo} options={THERMO_OPTIONS} />
+            <div className="grid-2">
+              <NumField label="target Ms" value={MsTarget} onChange={setMsTarget} step={0.1} />
+              <button className="btn" onClick={designP4} style={{ alignSelf: "end" }}>Set p₄ for Ms</button>
+            </div>
+          </Section>
+          <Section title="Simulation">
+            <div className="grid-3">
+              <SelectField label="Flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />
+              <NumField label="N cells" value={N} onChange={v => setN(Math.round(v))} step={100} />
+              <NumField label="CFL" value={cfl} onChange={setCfl} step={0.05} />
+            </div>
+            <Segmented label="x–t field" value={xtField} onChange={setXtField}
+                       options={[{ value: "logp", label: "log p" }, { value: "T", label: "T" },
+                                 { value: "logrho", label: "log ρ" }, { value: "Y", label: "driver" }]} />
+            <div className="note">Expect a few-percent pressure blip when waves cross the smeared driver/driven
+              interface: a known artefact of conservative two-gas schemes (Abgrall 1996), not physics.</div>
+          </Section>
+          <CaseSection onSave={saveCase} onLoad={onLoadCase} onExport={exportCSV} />
+          <button className="btn" onClick={exportHistory} disabled={!H.t.length} style={{ width: "100%" }}>Export end-wall history CSV</button>
+        </aside>
+
+        <main className="main">
+          {live.error ? <div className="alert">{live.error}</div> : (
+            <section className="stage">
+              <div className="stage-head">
+                <span className="stage-title">Ideal shock-tube theory</span>
+                <span className="muted">{thermo === "thermally-perfect" ? "thermally perfect" : "calorically perfect"} · updates as you type</span>
+              </div>
+              <div className="metrics">
+                <div><span>Ms</span><b>{sig(la.Ms, 4)}</b></div>
+                <div><span>shock speed W</span><b>{sig(la.W, 4)} m/s</b></div>
+                <div><span>Mr (reflected)</span><b>{sig(la.reflected.Mr, 4)}</b></div>
+                <div><span>p₅ / T₅</span><b>{sig(la.states[5].p / 1e5, 4)} bar · {sig(la.states[5].T, 4)} K</b></div>
+                <div><span>test time</span><b>{sig(la.times.testTime * MS, 4)} ms</b></div>
+                <div><span>limited by</span><b>{la.times.limitedBy}</b></div>
+                <div><span>interface</span><b className={la.interaction.tailoring === "tailored" ? "ok" : ""}>{la.interaction.tailoring}</b>
+                  <small>p*/p₅ = {sig(la.interaction.pStarOverP5, 4)}</small></div>
+                <div><span>shock at end wall</span><b>{sig(la.times.shockAtWall * MS, 4)} ms</b></div>
+              </div>
+              <div className="table-wrap">
+                <table className="states-table">
+                  <thead><tr><th>state</th>{[1, 2, 3, 4, 5].map(k => <th key={k}>{k}</th>)}</tr></thead>
+                  <tbody>
+                    <tr><td>gas</td>{[1, 2, 3, 4, 5].map(k => <td key={k}>{la.states[k].gas}</td>)}</tr>
+                    {FAC_TABLE_ROWS.map(([key, label, f]) => (
+                      <tr key={key}><td>{label}</td>{[1, 2, 3, 4, 5].map(k => <td key={k}>{f(la.states[k][key])}</td>)}</tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <div className="stage-foot"><span className="note">1 driven gas · 2 behind the incident shock · 3 expanded driver ·
+                4 driver · 5 behind the reflected shock (test gas at the end wall). Inviscid, ideal diaphragm burst,
+                no boundary-layer attenuation: real test times are shorter.</span></div>
+              {la.states[5].T > T_WARN && <div className="alert" style={{ margin: 12 }}>T₅ above {T_WARN} K: dissociation
+                matters there and the frozen-composition gas over-predicts T₅.</div>}
+            </section>
+          )}
+
+          <Transport player={player} stale={stale} tUnit={{ scale: MS, label: "ms" }}
+                     onSolve={() => run("solve")} onPlay={() => run("play")}
+                     info={frame ? frame.step + " steps · " + Math.round(player.computeMs) + " ms" : null} />
+          {stale && <div className="note">Inputs changed — the theory above is live; press <b>Solve</b> (Enter) to rerun the simulation.</div>}
+          {err && <div className="alert">{err}</div>}
+          {player && player.error && <div className="alert">{player.error} Try a finer grid or a lower CFL.</div>}
+
+          {SP && (
+            <section className="stage">
+              <div className="stage-head">
+                <span className="stage-title">x–t wave diagram</span>
+                <span className="muted">{XT_FIELDS[xtField].label} · simulation (colour) vs ideal theory (lines)</span>
+              </div>
+              <div className="stage-body">
+                <XTDiagram player={player} meta={meta} analysis={A} fieldKey={xtField} range={xtRange}
+                           L4={SP.L4} L1={SP.L1} runId={solved.current.run} cursorT={frame ? frame.t : null}
+                           onSeek={t => player && (player.pause(), player.seek(t))} />
+              </div>
+            </section>
+          )}
+
+          {sol && (
+            <div className="plots">
+              {H.t.length > 1 && <PlotCard title="end-wall pressure [kPa] vs t [ms]" x={H.t} y={H.p} yScale={KPA}
+                                           refY={histRef("p")} refLabel="theory (p₁, p₅ in test window)" resetKey={resetKey}
+                                           hoverX={frame ? frame.t * MS : null} />}
+              {H.t.length > 1 && <PlotCard title="end-wall temperature [K] vs t [ms]" x={H.t} y={H.T}
+                                           refY={histRef("T")} refLabel="theory (T₁, T₅)" resetKey={resetKey}
+                                           hoverX={frame ? frame.t * MS : null} />}
+              {tubePlot("pressure along the tube [kPa]", "p", KPA)}
+              {tubePlot("temperature along the tube [K]", "T")}
+              {tubePlot("velocity along the tube [m/s]", "u")}
+              {sol.Y && tubePlot("driver-gas mass fraction Y", "Y")}
+            </div>
+          )}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Verification workspace: order of accuracy and grid convergence index
+// ============================================================
+// Categorical slots 1–3 of the validated dark palette (dataviz reference).
+const NORM_COLORS = { L1: "#3987e5", L2: "#d95926", Linf: "#199e70" };
+const NORM_LABELS = { L1: "L1", L2: "L2", Linf: "L∞" };
+const LOG_PAD = { l: 56, r: 64, t: 12, b: 34 };
+
+// log–log error vs h with reference slopes 1 and 2, direct-labelled series.
+function OrderPlot({ result }) {
+  const ref = useCanvas((ctx, W, H) => {
+    ctx.fillStyle = THEME.plotBg; ctx.fillRect(0, 0, W, H);
+    if (!result || result.rows.length < 1) return;
+    const rows = result.rows, keys = ["L1", "L2", "Linf"];
+    const pw = W - LOG_PAD.l - LOG_PAD.r, ph = H - LOG_PAD.t - LOG_PAD.b;
+    const lh = rows.map(r => Math.log10(r.h)), le = [];
+    rows.forEach(r => keys.forEach(k => le.push(Math.log10(r[k]))));
+    let x0 = Math.min(...lh) - 0.15, x1 = Math.max(...lh) + 0.15, y0 = Math.min(...le) - 0.3, y1 = Math.max(...le) + 0.3;
+    const X = v => LOG_PAD.l + (v - x0) / (x1 - x0) * pw, Y = v => LOG_PAD.t + (1 - (v - y0) / (y1 - y0)) * ph;
+    // decade grid
+    ctx.strokeStyle = THEME.grid; ctx.fillStyle = THEME.tick; ctx.font = THEME.font;
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (let d = Math.ceil(y0); d <= Math.floor(y1); d++) {
+      ctx.beginPath(); ctx.moveTo(LOG_PAD.l, Y(d)); ctx.lineTo(LOG_PAD.l + pw, Y(d)); ctx.stroke();
+      ctx.fillText("1e" + d, LOG_PAD.l - 6, Y(d));
+    }
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    rows.forEach(r => { const x = X(Math.log10(r.h)); ctx.beginPath(); ctx.moveTo(x, LOG_PAD.t); ctx.lineTo(x, LOG_PAD.t + ph); ctx.stroke(); ctx.fillText("1/" + r.N, x, LOG_PAD.t + ph + 5); });
+    ctx.fillText("grid spacing h", LOG_PAD.l + pw / 2, LOG_PAD.t + ph + 19);
+    ctx.strokeStyle = THEME.axis; ctx.strokeRect(LOG_PAD.l + 0.5, LOG_PAD.t + 0.5, pw - 1, ph - 1);
+    // reference slopes through the coarsest L1 point
+    ctx.save(); ctx.beginPath(); ctx.rect(LOG_PAD.l, LOG_PAD.t, pw, ph); ctx.clip();
+    const ax = lh[0], ay = Math.log10(rows[0].L1) + 0.25;
+    for (const p of [1, 2]) {
+      ctx.strokeStyle = THEME.ref; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(X(x0), Y(ay + p * (x0 - ax))); ctx.lineTo(X(x1), Y(ay + p * (x1 - ax))); ctx.stroke();
+      ctx.setLineDash([]); ctx.fillStyle = THEME.ref; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+      ctx.fillText("slope " + p, X(lh[lh.length - 1]) + 4, Y(ay + p * (lh[lh.length - 1] - ax)) - 2);
+    }
+    // series
+    for (const k of keys) {
+      ctx.strokeStyle = NORM_COLORS[k]; ctx.lineWidth = 2; ctx.beginPath();
+      rows.forEach((r, i) => (i ? ctx.lineTo(X(lh[i]), Y(Math.log10(r[k]))) : ctx.moveTo(X(lh[i]), Y(Math.log10(r[k])))));
+      ctx.stroke();
+      rows.forEach((r, i) => {
+        ctx.beginPath(); ctx.arc(X(lh[i]), Y(Math.log10(r[k])), 4, 0, Math.PI * 2);
+        ctx.fillStyle = NORM_COLORS[k]; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = THEME.plotBg; ctx.stroke();
+      });
+    }
+    ctx.restore();
+    // direct labels at the finest point (≤ 4 series)
+    ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.fillStyle = THEME.ink;
+    const last = rows[rows.length - 1];
+    keys.forEach(k => ctx.fillText(NORM_LABELS[k], X(lh[lh.length - 1]) + 10, Y(Math.log10(last[k]))));
+  }, [result]);
+  return <canvas ref={ref} className="plot-canvas" style={{ height: 300 }} />;
+}
+
+// f vs h with the Richardson-extrapolated value at h = 0, the GCI band on the
+// finest grid, and the exact answer (when known) as a dashed line.
+function GCIPlot({ result }) {
+  const ref = useCanvas((ctx, W, H) => {
+    ctx.fillStyle = THEME.plotBg; ctx.fillRect(0, 0, W, H);
+    if (!result) return;
+    const rows = result.rows, g = result.gci;
+    const pw = W - LOG_PAD.l - LOG_PAD.r, ph = H - LOG_PAD.t - LOG_PAD.b;
+    const hs = rows.map(r => r.h), fs = rows.map(r => r.f);
+    const vals = fs.concat([g.fExt, result.band[0], result.band[1]]).concat(result.reference != null ? [result.reference] : []);
+    let y0 = Math.min(...vals), y1 = Math.max(...vals); const pad = (y1 - y0) * 0.12 || Math.abs(y1) * 0.01; y0 -= pad; y1 += pad;
+    const x1 = Math.max(...hs) * 1.08;
+    const X = h => LOG_PAD.l + (h / x1) * pw, Y = v => LOG_PAD.t + (1 - (v - y0) / (y1 - y0)) * ph;
+    ctx.strokeStyle = THEME.grid; ctx.fillStyle = THEME.tick; ctx.font = THEME.font;
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (const v of niceTicks(y0, y1, 5)) { ctx.beginPath(); ctx.moveTo(LOG_PAD.l, Y(v)); ctx.lineTo(LOG_PAD.l + pw, Y(v)); ctx.stroke(); ctx.fillText(sig(v, 5), LOG_PAD.l - 6, Y(v)); }
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.fillText("0", X(0), LOG_PAD.t + ph + 5);
+    rows.forEach(r => ctx.fillText("1/" + r.N, X(r.h), LOG_PAD.t + ph + 5));
+    ctx.fillText("grid spacing h (Richardson extrapolation to h = 0)", LOG_PAD.l + pw / 2, LOG_PAD.t + ph + 19);
+    ctx.strokeStyle = THEME.axis; ctx.strokeRect(LOG_PAD.l + 0.5, LOG_PAD.t + 0.5, pw - 1, ph - 1);
+    if (result.reference != null) {
+      ctx.strokeStyle = THEME.ref; ctx.setLineDash([4, 3]); ctx.lineWidth = 1.25;
+      ctx.beginPath(); ctx.moveTo(LOG_PAD.l, Y(result.reference)); ctx.lineTo(LOG_PAD.l + pw, Y(result.reference)); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = THEME.ref; ctx.textAlign = "left"; ctx.textBaseline = "bottom"; ctx.fillText("exact", LOG_PAD.l + pw + 4, Y(result.reference) + 4);
+    }
+    // fit curve f(h) = fExt + C h^p through the finest grid
+    const C = (fs[fs.length - 1] - g.fExt) / Math.pow(hs[hs.length - 1], g.p);
+    if (Number.isFinite(C) && Number.isFinite(g.p)) {
+      ctx.strokeStyle = THEME.series; ctx.lineWidth = 1.25; ctx.globalAlpha = 0.6; ctx.beginPath();
+      for (let k = 0; k <= 60; k++) { const h = (k / 60) * Math.max(...hs); const y = g.fExt + C * Math.pow(h, g.p); k ? ctx.lineTo(X(h), Y(y)) : ctx.moveTo(X(h), Y(y)); }
+      ctx.stroke(); ctx.globalAlpha = 1;
+    }
+    // GCI band on the finest grid
+    const hf = hs[hs.length - 1];
+    ctx.strokeStyle = THEME.cursor; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(X(hf), Y(result.band[0])); ctx.lineTo(X(hf), Y(result.band[1]));
+    ctx.moveTo(X(hf) - 6, Y(result.band[0])); ctx.lineTo(X(hf) + 6, Y(result.band[0]));
+    ctx.moveTo(X(hf) - 6, Y(result.band[1])); ctx.lineTo(X(hf) + 6, Y(result.band[1])); ctx.stroke();
+    // grid results
+    rows.forEach(r => { ctx.beginPath(); ctx.arc(X(r.h), Y(r.f), 4, 0, Math.PI * 2); ctx.fillStyle = THEME.series; ctx.fill(); ctx.lineWidth = 2; ctx.strokeStyle = THEME.plotBg; ctx.stroke(); });
+    // extrapolated value
+    ctx.beginPath(); ctx.arc(X(0), Y(g.fExt), 5, 0, Math.PI * 2); ctx.lineWidth = 2; ctx.strokeStyle = THEME.series; ctx.stroke();
+    ctx.fillStyle = THEME.ink; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText("f_ext", X(0) + 8, Y(g.fExt));
+    ctx.fillText("GCI band", X(hf) + 10, Y(result.band[1]));
+  }, [result]);
+  return <canvas ref={ref} className="plot-canvas" style={{ height: 300 }} />;
+}
+
+const VERIFY_STUDIES = Object.assign(
+  {}, ...Object.keys(ORDER_STUDIES).map(k => ({ [k]: { kind: "order", label: ORDER_STUDIES[k].label, grids: "25,50,100,200,400" } })),
+  ...Object.keys(GCI_STUDIES).map(k => ({ [k]: { kind: "gci", label: GCI_STUDIES[k].label, grids: "100,200,400" } }))
+);
+
+function VerifyApp({ onHelp }) {
+  const [study, setStudy] = useState("smooth-advection");
+  const [grids, setGrids] = useState(VERIFY_STUDIES["smooth-advection"].grids);
+  const [flux, setFlux] = useState("HLLC");
+  const [progress, setProgress] = useState(null);
+  const [result, setResult] = useState(null);
+  const [err, setErr] = useState(null);
+  const cancelRef = useRef(null);
+  const kind = VERIFY_STUDIES[study].kind;
+
+  useEffect(() => () => cancelRef.current && cancelRef.current(), []);
+  const pick = s => { setStudy(s); setGrids(VERIFY_STUDIES[s].grids); setResult(null); setErr(null); };
+  const runStudy = () => {
+    if (cancelRef.current) cancelRef.current();
+    const Ns = grids.split(/[\s,;]+/).filter(Boolean).map(Number);
+    if (!Ns.length || Ns.some(n => !(n >= 10 && n <= 3200 && Number.isInteger(n)))) { setErr("Grids: integers between 10 and 3200, comma-separated."); return; }
+    if (kind === "gci" && Ns.length < 3) { setErr("A GCI study needs at least three grids."); return; }
+    setErr(null); setResult(null); setProgress({ grid: 0, of: Ns.length, N: Ns[0], progress: 0 });
+    const gen = kind === "order" ? orderStudyGen(study, Ns, flux) : gciStudyGen(study, Ns);
+    cancelRef.current = runSliced(gen, v => setProgress(v),
+      res => { setResult(Object.assign({ kind }, res)); setProgress(null); cancelRef.current = null; },
+      e => { setErr(e.message); setProgress(null); cancelRef.current = null; });
+  };
+  const cancel = () => { if (cancelRef.current) cancelRef.current(); cancelRef.current = null; setProgress(null); };
+  const exportCSV = () => result && downloadText(study + "_" + kind + ".csv",
+    tableToCSV(result.rows.map(r => Object.assign({}, r))), "text/csv");
+
+  const ord = result && result.kind === "order" ? result.order : null;
+  const g = result && result.kind === "gci" ? result.gci : null;
+  const done = progress ? (progress.grid + Math.max(0, Math.min(1, progress.progress || 0))) / progress.of : 0;
+
+  return (
+    <div className="app">
+      <TopBar active="verify" scheme="code & solution verification" onHelp={onHelp} />
+      <div className="workspace">
+        <aside className="rail">
+          <p className="rail-intro">
+            Matching Sod shows the code is coded right; it doesn't say how big the discretisation error is in your answer.
+            Order-of-accuracy studies check the scheme against exact solutions; the grid convergence index puts an error bar on a result.
+          </p>
+          <Section title="Study">
+            <SelectField label="Study" value={study} onChange={pick}
+                         options={Object.keys(VERIFY_STUDIES).map(k => ({ value: k, label: (VERIFY_STUDIES[k].kind === "order" ? "Order · " : "GCI · ") + VERIFY_STUDIES[k].label }))} />
+            <label className="field"><span className="field-label">Grids (cells)</span>
+              <input type="text" value={grids} onChange={e => setGrids(e.target.value)}
+                     style={{ fontFamily: "var(--font-mono)", fontSize: 12, padding: "6px 8px", background: "var(--field)", color: "var(--ink)", border: "1px solid var(--faint)", borderRadius: "var(--r-sm)" }} />
+            </label>
+            {kind === "order" && <SelectField label="Riemann flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />}
+            <div className="grid-2">
+              <button className="btn btn-primary" onClick={runStudy} disabled={!!progress}>Run study</button>
+              <button className="btn" onClick={cancel} disabled={!progress}>Cancel</button>
+            </div>
+            <button className="btn" onClick={exportCSV} disabled={!result}>Export results CSV</button>
+          </Section>
+          <Section title="Method">
+            <div className="note">
+              <b>Order of accuracy</b>: error norms against an exact solution on a grid sequence; the observed order is the
+              least-squares slope of log error vs log h. Smooth problems reveal the design order (2 for MUSCL + SSP-RK2;
+              minmod clips extrema so L∞ stays lower). Discontinuous problems cap L1 near 1 for every scheme.<br /><br />
+              <b>GCI</b> (Celik et al., J. Fluids Eng. 130, 2008): three grids give the apparent order p and a Richardson
+              extrapolation f_ext; GCI_fine = 1.25 |(f₁ − f₂)/f₁| / (rᵖ − 1). The asymptotic ratio ≈ 1 confirms the grids
+              are fine enough for the estimate to be trusted.<br /><br />
+              Headless: <code>node -e 'console.log(require("./verify").gciStudy("nozzle-shock-position",[100,200,400]))'</code>
+            </div>
+          </Section>
+        </aside>
+
+        <main className="main">
+          {err && <div className="alert">{err}</div>}
+          {progress && (
+            <div className="transport">
+              <span className="chip chip-computing">computing</span>
+              <div className="progress"><i style={{ width: (100 * done).toFixed(1) + "%" }} /></div>
+              <span className="clock">grid {progress.grid + 1} / {progress.of} · N = {progress.N}</span>
+            </div>
+          )}
+          {!result && !progress && <div className="note">Pick a study and press <b>Run study</b>. Each grid runs in time slices, so the page stays responsive.</div>}
+
+          {ord && (
+            <React.Fragment>
+              <section className="stage">
+                <div className="stage-head"><span className="stage-title">{result.label}</span>
+                  <span className="muted">expected order ≈ {result.expected}</span></div>
+                <div className="metrics">
+                  {["L1", "L2", "Linf"].map(k => ord[k] && (
+                    <div key={k}><span>{NORM_LABELS[k]} observed order</span><b>{sig(ord[k].slope, 3)}</b>
+                      <small>finest pair {sig(ord[k].pairwise[ord[k].pairwise.length - 1], 3)}</small></div>
+                  ))}
+                </div>
+                <div className="stage-body"><OrderPlot result={result} /></div>
+                <div className="stage-foot"><span className="note">Error norms of ρ vs h (log–log). Dashed: slopes 1 and 2.</span></div>
+              </section>
+              <div className="table-wrap">
+                <table className="states-table">
+                  <thead><tr><th>N</th><th>h</th><th>L1</th><th>L2</th><th>L∞</th><th>order L1</th><th>order L∞</th><th>steps</th></tr></thead>
+                  <tbody>{result.rows.map((r, i) => (
+                    <tr key={r.N}><td>{r.N}</td><td>{sig(r.h, 4)}</td><td>{sig(r.L1, 4)}</td><td>{sig(r.L2, 4)}</td><td>{sig(r.Linf, 4)}</td>
+                      <td>{i ? sig(ord.L1.pairwise[i - 1], 3) : "—"}</td><td>{i ? sig(ord.Linf.pairwise[i - 1], 3) : "—"}</td><td>{r.steps}</td></tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            </React.Fragment>
+          )}
+
+          {g && (
+            <React.Fragment>
+              <section className="stage">
+                <div className="stage-head"><span className="stage-title">{result.label}</span>
+                  <span className="muted">quantity {result.quantity}</span></div>
+                <div className="metrics">
+                  <div><span>fine-grid value</span><b>{sig(result.fine, 6)}</b></div>
+                  <div><span>GCI (fine)</span><b>± {sig(100 * g.gciFine, 3)} %</b></div>
+                  <div><span>apparent order p</span><b>{sig(g.p, 3)}</b><small>{g.convergence}</small></div>
+                  <div><span>extrapolated f_ext</span><b>{sig(g.fExt, 6)}</b></div>
+                  <div><span>asymptotic ratio</span><b>{sig(g.asymptoticRatio, 3)}</b><small>≈ 1 is good</small></div>
+                  {result.reference != null && <div><span>exact</span><b>{sig(result.reference, 6)}</b>
+                    <small className={result.referenceInsideBand ? "ok" : ""}>{result.referenceInsideBand ? "inside the GCI band" : "outside the GCI band"}</small></div>}
+                </div>
+                <div className="stage-body"><GCIPlot result={result} /></div>
+              </section>
+              <div className="table-wrap">
+                <table className="states-table">
+                  <thead><tr><th>N</th><th>h</th><th>{result.quantity}</th></tr></thead>
+                  <tbody>{result.rows.map(r => <tr key={r.N}><td>{r.N}</td><td>{sig(r.h, 4)}</td><td>{sig(r.f, 7)}</td></tr>)}</tbody>
+                </table>
+              </div>
+            </React.Fragment>
+          )}
+
+          <section className="stage">
+            <div className="stage-head"><span className="stage-title">Validation against experiment</span></div>
+            <div className="note">
+              Verification shows the equations are solved correctly; validation shows they are the right equations for the
+              hardware. <code>node validation/sajben.js</code> compares the quasi-1D solver with the measured wall pressures of
+              the Sajben transonic diffuser (NPARC data), with and without the boundary-layer displacement correction; see
+              <code>validation/sajben/README.md</code>. To see it here, load <code>cases/sajben-weak.json</code> in the Nozzle tab
+              and overlay <code>cases/sajben-weak-measured.csv</code> with <b>Load p/p₀ CSV</b>.
+            </div>
+          </section>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
+// Shell: hash-routed workspaces, shared help drawer, case loading
+// ============================================================
+const ROUTES = ["shocktube", "nozzle", "facility", "verify"];
+function routeFromHash() { const r = location.hash.replace("#", ""); return ROUTES.includes(r) ? r : "shocktube"; }
+
+function App() {
+  const [mode, setMode] = useState(routeFromHash());
+  const [help, setHelp] = useState(false);
+  const [loaded, setLoaded] = useState({ n: 0, c: null });     // case handed to the next workspace mount
+  const [loadErr, setLoadErr] = useState(null);
+  useEffect(() => {
+    const onHash = () => setMode(routeFromHash());
+    const onKey = e => { if (e.key === "Escape") setHelp(false); };
+    window.addEventListener("hashchange", onHash);
+    window.addEventListener("keydown", onKey);
+    return () => { window.removeEventListener("hashchange", onHash); window.removeEventListener("keydown", onKey); };
+  }, []);
+  const toggleHelp = () => setHelp(h => !h);
+  const loadCase = () => pickTextFile(".json,application/json").then(f => {
+    const c = normalizeCase(JSON.parse(f.text));        // validates; throws with a readable message
+    setLoadErr(null);
+    setLoaded(L => ({ n: L.n + 1, c }));
+    if (location.hash !== "#" + c.kind) location.hash = c.kind; else setMode(c.kind);
+  }).catch(e => setLoadErr("Could not load case: " + e.message));
+
+  const caseFor = kind => (loaded.c && loaded.c.kind === kind ? loaded.c : null);
+  const props = kind => ({ key: kind + loaded.n, onHelp: toggleHelp, onLoadCase: loadCase, initialCase: caseFor(kind) });
+  return (
+    <React.Fragment>
+      {loadErr && <div className="alert toast" onClick={() => setLoadErr(null)}>{loadErr}</div>}
+      {mode === "nozzle" ? <NozzleApp {...props("nozzle")} />
+        : mode === "facility" ? <FacilityApp {...props("facility")} />
+        : mode === "verify" ? <VerifyApp key="verify" onHelp={toggleHelp} />
+        : <ShockTubeApp {...props("shocktube")} />}
+      <HelpDrawer open={help} onClose={() => setHelp(false)}>
+        <h2>Euler Lab</h2>
+        <p>Second-order finite-volume solutions of the compressible Euler equations, computed live in the browser.
+          Real gases in SI units: air, N₂, O₂, Ar, He, H₂, CO₂ and frozen combustion products, calorically or
+          thermally perfect (γ = γ(T), NASA polynomials).</p>
+        <p><b>Shock tube</b>: a Riemann problem, one or two gases, against the exact real-gas solution.</p>
+        <p><b>Nozzle</b>: quasi-1D duct from a reservoir, analytic or tabulated A(x), against the exact steady
+          solution in every regime (including the normal-shock position); overlay measured p/p₀.</p>
+        <p><b>Facility</b>: reflected-shock-tube design: incident/reflected shock states, tailoring, test time, and an
+          x–t diagram from the two-gas simulation.</p>
+        <p><b>Verify</b>: order-of-accuracy studies and grid convergence index (GCI) error bars.</p>
+        <h3>Workflow</h3>
+        <p>Presets solve immediately; after editing press <b>Solve</b>. Runs compute in small slices between
+          animation frames, so the page stays responsive; <b>Play</b> replays a run and the timeline scrubs it. Hover any
+          plot or field to probe values. <b>Save case</b> writes a JSON file that also runs headless with
+          <code> node run.js case.json</code>; <b>Export CSV</b> writes the fields at the current time.</p>
+      </HelpDrawer>
+    </React.Fragment>
+  );
+}
+
+if (!window.__eulerRoot) {
+  window.__eulerRoot = ReactDOM.createRoot(document.getElementById("root"));
+}
+window.__eulerRoot.render(<App />);
+</script>
+
+<!-- Resilience net: if @babel/standalone finishes loading AFTER DOMContentLoaded,
+     its automatic transform of the text/babel script never fires and the page
+     stays on "Loading...". -->
+<script>
+// Runs only after the page has loaded and only if the app script never
+// started (window.__eulerBooted), so it can't execute the app twice.
+window.addEventListener('load', function () {
+  (function ensureBabelRuns(tries){
+    if (window.__eulerBooted) return;
+    if (window.Babel && window.React && window.ReactDOM) {
+      try { window.Babel.transformScriptTags(); } catch (e) {}
+    }
+    if (!window.__eulerBooted && tries < 60) {
+      setTimeout(function(){ ensureBabelRuns(tries + 1); }, 120);
+    }
+  })(0);
+});
+</script>
+</body>
+</html>

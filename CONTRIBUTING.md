@@ -29,14 +29,15 @@ the case — the default answer is "keep it vanilla."
 | `nozzle.js`    | Quasi-1D nozzle math (area source, reservoir/back-pressure BCs). Builds on `solver.js`. |
 | `boundary.js`  | Turbulent integral boundary layer and its displacement coupling with the exact quasi-1D solution. Builds on `nozzle.js`. |
 | `solver2d.js`  | 2D Cartesian Euler. Self-contained. No DOM. |
-| `index.html`   | 1D UI (shock tube + nozzle). React via Babel-standalone. |
+| `index.html`   | Start page. Static HTML; the hero runs `solver.js` directly. |
+| `lab.html`     | 1D UI (shock tube, nozzle, facility, verify). React via Babel-standalone. |
 | `index2d.html` | 2D UI. |
 | `facility.js`  | Shock-tube facility analysis. No DOM. |
 | `case.js`, `run.js` | JSON cases, CSV, headless CLI (Node built-ins only). |
 | `verify.js`    | Order-of-accuracy studies and GCI. No DOM. |
 | `validation/`  | Experimental comparisons. Data must come from the real source — never invent it. |
 | `labui.js`     | Shared UI layer: playback engine, canvas plots, controls. No math. |
-| `lab.css`      | Shared stylesheet. |
+| `lab.css`      | Shared stylesheet, light and dark themes. Colours are tokens; canvases read them through `LabUI.THEME`. |
 | `test.js`      | Zero-dependency Node verification suite. |
 
 The math layers know nothing about the DOM; the HTML knows nothing about HLLC.

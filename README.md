@@ -12,7 +12,8 @@ Or run it locally:
 git clone https://github.com/mehdiansari-cfd/cfdsolver.git
 cd cfdsolver
 # then just open the HTML files in a browser:
-open index.html        # shock tube, nozzle, facility, verify   (macOS; `start` on Windows, `xdg-open` on Linux)
+open index.html        # start page, with links into every workspace (macOS; `start` on Windows, `xdg-open` on Linux)
+open lab.html          # straight into the lab: shock tube, nozzle, facility, verify
 open index2d.html      # 2D Cartesian
 
 # or headless, from scripts and parameter sweeps (Node ≥ 18, nothing to install):
@@ -328,10 +329,11 @@ The 2D UI (`index2d.html`) is the parallel page to the shock-tube lab: a canvas 
 
 ```
 cfdsolver/
-├── index.html          1D UI: shock tube, nozzle, facility, verify (React via Babel-standalone, canvas)
+├── index.html          Start page: a live Sod run (solver.js, no React) and links into the workspaces
+├── lab.html            1D UI: shock tube, nozzle, facility, verify (React via Babel-standalone, canvas)
 ├── index2d.html        2D UI: heatmap + line-outs along movable cuts
 ├── labui.js            Shared UI layer: playback engine, canvas plots, controls (no math)
-├── lab.css             Shared workspace stylesheet
+├── lab.css             Shared stylesheet: light and dark colour tokens, used by the canvases too
 ├── gas.js              Gas models in SI: NASA-7 thermo, mixtures, isentropes, stagnation states
 ├── solver.js           1D Euler math: EOS adapters, fluxes, MUSCL, SSP-RK2, exact Riemann (ideal + real gas)
 ├── nozzle.js           Quasi-1D nozzle: area source, tabulated A(x), reservoir + back-pressure BCs,

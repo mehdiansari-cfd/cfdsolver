@@ -26,19 +26,52 @@
   const h = React.createElement;
   const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
-  // ---------- Theme (mirrors lab.css tokens; canvases can't read CSS vars cheaply) ----------
+  // ---------- Theme ----------
+  // Canvases can't use CSS variables, so THEME holds the current values of
+  // the lab.css tokens: readTheme() refreshes it, and a theme switch fires
+  // THEME_EVENT so every useCanvas redraws. Defaults are the dark theme.
   const THEME = {
-    plotBg:   "#101317",
-    grid:     "#1f242b",
-    axis:     "#3a414c",
-    tick:     "#7d8794",
-    series:   "#d9653f",   // numerical solution — one role, one colour, every plot
-    data:     "#4a8fe0",   // measured / imported data points (validated vs series on plotBg)
-    ref:      "#98a0ab",   // analytical reference — neutral, dashed
-    ref2:     "#5fb3a3",   // second model (e.g. with a boundary-layer correction) — teal, long dash
-    cursor:   "#d7a33c",
-    font:     "10px ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace"
+    plotBg: "#15181d", stage: "#0f1114", grid: "#1f242a", axis: "#343a43", tick: "#7d8794", ink: "#e8eaed",
+    series: "#d9653f", data: "#4a8fe0", ref: "#98a0ab", ref2: "#5fb3a3", cursor: "#d7a33c", accent: "#e2724b",
+    wall: "#c8ccd2",
+    font: "10px ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace"
   };
+  const THEME_TOKENS = {
+    plotBg: "--plot", stage: "--stage", grid: "--grid", axis: "--axis", tick: "--tick", ink: "--ink",
+    series: "--series", data: "--data", ref: "--ref", ref2: "--ref2", cursor: "--accent-2", accent: "--accent",
+    wall: "--wall"
+  };
+  const THEME_EVENT = "eulerlab-theme";
+  const THEME_KEY = "eulerlab-theme";
+  function readTheme() {
+    const cs = getComputedStyle(document.documentElement);
+    for (const k in THEME_TOKENS) { const v = cs.getPropertyValue(THEME_TOKENS[k]).trim(); if (v) THEME[k] = v; }
+  }
+  function currentTheme() {
+    const t = document.documentElement.dataset.theme;
+    if (t === "light" || t === "dark") return t;
+    return window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  function setTheme(t) {
+    document.documentElement.dataset.theme = t;
+    try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* private mode: theme just isn't remembered */ }
+    readTheme();
+    window.dispatchEvent(new Event(THEME_EVENT));
+  }
+  readTheme();
+  if (window.matchMedia) {
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readTheme(); window.dispatchEvent(new Event(THEME_EVENT)); });
+  }
+  // Re-render on theme switches (components that draw with THEME).
+  function useThemeVersion() {
+    const [v, setV] = useState(0);
+    useEffect(() => {
+      const f = () => setV(n => n + 1);
+      window.addEventListener(THEME_EVENT, f);
+      return () => window.removeEventListener(THEME_EVENT, f);
+    }, []);
+    return v;
+  }
 
   // ---------- Number formatting ----------
   function fmt(v, digits) {
@@ -293,10 +326,11 @@
     const ref = useRef(null);
     const drawRef = useRef(draw);
     drawRef.current = draw;
+    const themeV = useThemeVersion();
     useEffect(() => {
       const cv = ref.current; if (!cv) return;
       const f = fitCanvas(cv); drawRef.current(f.ctx, f.W, f.H);
-    }, deps);
+    }, (deps || []).concat([themeV]));
     useEffect(() => {
       const cv = ref.current; if (!cv || typeof ResizeObserver === "undefined") return;
       const ro = new ResizeObserver(() => { const f = fitCanvas(cv); drawRef.current(f.ctx, f.W, f.H); });
@@ -369,13 +403,9 @@
                    .replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, ""), pad.l - 6, py);
     }
     ctx.textAlign = "center"; ctx.textBaseline = "top";
-    for (const v of niceTicks(xMin, xMax, 5)) {
-      const px = Math.round(X(v)) + 0.5;
-      ctx.beginPath(); ctx.moveTo(px, pad.t); ctx.lineTo(px, pad.t + ph); ctx.stroke();
-      ctx.fillText(String(+v.toFixed(6)), px, pad.t + ph + 6);
-    }
-    ctx.strokeStyle = THEME.axis;
-    ctx.strokeRect(pad.l + 0.5, pad.t + 0.5, pw - 1, ph - 1);
+    for (const v of niceTicks(xMin, xMax, 5)) ctx.fillText(String(+v.toFixed(6)), Math.round(X(v)) + 0.5, pad.t + ph + 6);
+    ctx.strokeStyle = THEME.axis;                       // baseline only: horizontal grid, no box
+    ctx.beginPath(); ctx.moveTo(pad.l, pad.t + ph + 0.5); ctx.lineTo(pad.l + pw, pad.t + ph + 0.5); ctx.stroke();
 
     ctx.save();
     ctx.beginPath(); ctx.rect(pad.l, pad.t, pw, ph); ctx.clip();
@@ -569,21 +599,41 @@
   }
 
   // ---------- Top bar with page tabs ----------
+  const LAB_TABS = [
+    { id: "shocktube", label: "Shock tube", href: "lab.html#shocktube" },
+    { id: "nozzle",    label: "Nozzle",     href: "lab.html#nozzle" },
+    { id: "facility",  label: "Facility",   href: "lab.html#facility" },
+    { id: "verify",    label: "Verify",     href: "lab.html#verify" },
+    { id: "2d",        label: "2D field",   href: "index2d.html" }
+  ];
+  function ThemeToggle() {
+    const [t, setT] = useState(currentTheme);
+    useEffect(() => {
+      const f = () => setT(currentTheme());
+      window.addEventListener(THEME_EVENT, f);
+      return () => window.removeEventListener(THEME_EVENT, f);
+    }, []);
+    const next = t === "dark" ? "light" : "dark";
+    return h("button", { className: "btn icon ghost", onClick: () => setTheme(next),
+                         title: "Switch to " + next + " theme", "aria-label": "Switch to " + next + " theme" },
+      t === "dark"
+        ? h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", "aria-hidden": true },
+            h("circle", { cx: 12, cy: 12, r: 4 }),
+            h("path", { d: "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" }))
+        : h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true },
+            h("path", { d: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" })));
+  }
   function TopBar({ active, scheme, onHelp }) {
-    const tabs = [
-      { id: "shocktube", label: "Shock tube", href: "index.html#shocktube" },
-      { id: "nozzle",    label: "Nozzle",     href: "index.html#nozzle" },
-      { id: "facility",  label: "Facility",   href: "index.html#facility" },
-      { id: "verify",    label: "Verify",     href: "index.html#verify" },
-      { id: "2d",        label: "2D field",   href: "index2d.html" }
-    ];
     return h("header", { className: "topbar" },
-      h("div", { className: "brand" }, h("span", { className: "brand-mark" }, "∂U/∂t"), "Euler Lab"),
-      h("nav", { className: "tabs" },
-        tabs.map(t => h("a", { key: t.id, href: t.href, className: "tab" + (t.id === active ? " on" : "") }, t.label))),
+      h("a", { className: "brand", href: "index.html", title: "Back to the start page" },
+        h("span", { className: "brand-mark", "aria-hidden": true }), "Euler Lab"),
+      h("nav", { className: "tabs", "aria-label": "Workspaces" },
+        LAB_TABS.map(t => h("a", { key: t.id, href: t.href, className: "tab" + (t.id === active ? " on" : ""),
+                                   "aria-current": t.id === active ? "page" : undefined }, t.label))),
       h("div", { className: "topbar-right" },
         scheme ? h("span", { className: "scheme" }, scheme) : null,
-        h("button", { className: "btn icon", onClick: onHelp, title: "Help & shortcuts (?)", "aria-label": "Help" }, "?")));
+        h(ThemeToggle),
+        h("button", { className: "btn icon ghost", onClick: onHelp, title: "Help & shortcuts (?)", "aria-label": "Help" }, "?")));
   }
 
   function HelpDrawer({ open, onClose, children }) {
@@ -688,7 +738,7 @@
   }
 
   window.LabUI = {
-    THEME, fmt, niceTicks, CMAP, colormap,
+    THEME, readTheme, setTheme, currentTheme, useThemeVersion, fmt, niceTicks, CMAP, colormap,
     Player, usePlayer, fitCanvas, useCanvas, useSmoothRange, finiteRange, drawPlot, useShortcuts,
     NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe,
     downloadText, pickTextFile, numericTable, runSliced

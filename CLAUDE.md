@@ -10,7 +10,7 @@ The numerical framework follows the structure laid out in *Write Your First CFD 
 
 **Do not add a build step, bundler, package manager install, transpile step, or framework migration.** This is the single most important constraint.
 
-- The pages (`index.html`, `index2d.html`) load React, ReactDOM, and Babel-standalone from a CDN (exact versions pinned), then `labui.js` and the solver `.js` files, then render. Open the HTML in a browser and it runs. There is no `npm install`, no `node_modules` in the runtime path, no CMake, no webpack/vite.
+- The start page (`index.html`) is static HTML that loads only `lab.css`, `gas.js` and `solver.js` (its hero runs a live Sod tube). The lab pages (`lab.html`, `index2d.html`) load React, ReactDOM, and Babel-standalone from a CDN (exact versions pinned), then `labui.js` and the solver `.js` files, then render. Open the HTML in a browser and it runs. There is no `npm install`, no `node_modules` in the runtime path, no CMake, no webpack/vite.
 - The math (`gas.js`, `solver.js`, `nozzle.js`, `facility.js`, `verify.js`, `solver2d.js`) and the driver layer (`case.js`) are plain JavaScript with **no third-party libraries** (only each other). Each file exposes browser globals *and* a CommonJS `module.exports` so it can be `require`d from Node for headless runs and tests.
 - The test suite (`test.js`), the CLI (`run.js`) and `validation/` use **only Node's built-in modules**. No test framework, no dev-dependencies.
 - If a dependency ever seems genuinely warranted, **flag it and make the case first** — the default answer is "keep it vanilla." See `CONTRIBUTING.md`.
@@ -72,11 +72,12 @@ If a feature doesn't fit cleanly into one of these slots, that's a signal to re-
 ### Actual file layout
 ```
 cfdsolver/
-├── index.html      1D UI: shock tube, nozzle, facility, verify workspaces (React via Babel-standalone, canvas)
+├── index.html      Start page: static HTML, live Sod hero (gas.js + solver.js), links into the lab; redirects old index.html#tab links
+├── lab.html        1D UI: shock tube, nozzle, facility, verify workspaces (React via Babel-standalone, canvas)
 ├── index2d.html    2D UI: heatmap + line-outs along movable cuts
 ├── labui.js        Shared UI layer: Player (time-budgeted compute + playback), canvas
 │                   plots, controls. Plain JS + React.createElement, no math, no JSX
-├── lab.css         Shared workspace stylesheet (colour tokens on :root)
+├── lab.css         Shared stylesheet: light + dark colour tokens on :root (canvases read them via LabUI.THEME)
 ├── gas.js          Gas models in SI: NASA-7 thermo, mixtures, T(e)/T(h), isentropes, stagnation
 ├── solver.js       1D Euler math: EOS adapters, fluxes, MUSCL, SSP-RK2, exact Riemann (ideal + real gas)
 ├── nozzle.js       Quasi-1D nozzle math: area source, PCHIP area tables, reservoir + back-pressure
@@ -253,7 +254,7 @@ If you suspect a bug, check these first.
 ## 9. Output and post-processing
 
 File output is **CSV and JSON only**, and lives outside the math files: the UI writes case files and CSV through `case.js` + `labui.js` download helpers; `run.js` writes field CSVs, reference-solution CSVs, probe histories, sweep tables and summary JSON.
-- **1D (`index.html`):** a canvas "inside the tube" strip (density / schlieren / pressure / Mach) plus canvas line plots (ρ, u, p, e and derived M, T, s, a), with the exact/isentropic reference drawn as a dashed overlay. Playback advects Lagrangian tracer particles. The nozzle adds ṁ(x) and a steady-state convergence (residual) plot.
+- **1D (`lab.html`):** a canvas "inside the tube" strip (density / schlieren / pressure / Mach) plus canvas line plots (ρ, u, p, e and derived M, T, s, a), with the exact/isentropic reference drawn as a dashed overlay. Playback advects Lagrangian tracer particles. The nozzle adds ṁ(x) and a steady-state convergence (residual) plot.
 - **2D (`index2d.html`):** a canvas heatmap (density / schlieren / pressure / Mach) rendered via `ImageData`, plus line-outs along two cuts the user places by clicking.
 - **Runs are recorded and replayable.** `LabUI.Player` computes in ~10 ms slices per animation frame (never blocking the page), records a frame each time the solution passes the next multiple of `t_end / maxFrames`, and plays them back at a steady rate with a scrubbable timeline. It never clips a step to land on a frame time — that would add a sliver step per frame.
 - For headless/batch work, `require` the solver from Node and read the arrays from `extract*` directly (see the README's Programmatic API and `test.js`).
@@ -268,7 +269,7 @@ New export formats belong in `case.js` / the UI layer, not the math files.
 - **Variable naming:** physical quantities use their symbols (`rho`, `u`, `v`, `p`, `E`, `gamma`, `cfl`); loop indices `i, j, k`; wave speeds `SL, SR, sStar`. Readers of Toro/Teschner should be able to scan the code.
 - **Comments** point at the *equation reference* (`// Toro Eq. 10.37: contact speed`) rather than restating the code.
 - **Magic numbers:** every numerical constant gets a name (`gamma`, `cfl`, `eps = 1e-8/1e-12`). No bare floats mid-expression.
-- **UI:** React via Babel-standalone, function components with hooks. Keep the workspace layout (top bar, control rail, stage, transport bar, plot grid) and the dark instrument-panel style: colour tokens on `:root` in `lab.css` (rust `#e2724b` accent, amber `#d7a33c` for live/cursor), system mono + serif font stacks, and the warm cream → rust colormap for fields. Numerical solution = solid accent line, analytical reference = dashed grey, in every plot. Draw plots and fields on `<canvas>` (not SVG) so per-frame updates stay cheap. The pages register a **classic** JSX runtime preset (`react-classic`) so Babel-standalone emits `React.createElement` — do not switch to the automatic runtime, which emits an ES-module `import` a non-module page can't resolve.
+- **UI:** React via Babel-standalone, function components with hooks. Keep the workspace layout (top bar with pill tabs, control rail, transport bar, stage, plot grid) and the clean style: system sans-serif UI text with tabular figures (mono only for code and axis ticks), sentence-case labels, cards with hairline borders, generous spacing. Two themes, light and dark (system default, toggled in the top bar, remembered in `localStorage["eulerlab-theme"]`): every colour is a token on `:root` in `lab.css`, defined for both themes (rust accent, amber `--accent-2` for live/cursor, `--series` / `--ref` / `--ref2` / `--data` for plot ink). **Canvases never hard-code colours**: they draw with `LabUI.THEME`, which `readTheme()` fills from those tokens, and `useCanvas` redraws on a theme switch. Fields keep the warm cream → rust colormap in both themes. Numerical solution = solid accent line, analytical reference = dashed grey, in every plot. Draw plots and fields on `<canvas>` (not SVG) so per-frame updates stay cheap. The pages register a **classic** JSX runtime preset (`react-classic`) so Babel-standalone emits `React.createElement` — do not switch to the automatic runtime, which emits an ES-module `import` a non-module page can't resolve.
 
 ---
 
