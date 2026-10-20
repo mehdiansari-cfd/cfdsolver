@@ -3,12 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#15181d">
 <title>Euler Lab · 1D</title>
 <script>
   // Apply a saved light / dark choice before first paint (otherwise the system setting decides).
   try { var t = localStorage.getItem("eulerlab-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
 </script>
-<link rel="stylesheet" href="lab.css">
+<link rel="stylesheet" href="lab.css?v=20261020">
 
 <!-- React + Babel from CDN (UI rendering only). Versions are pinned so an
      upstream release can never change or break the page. -->
@@ -25,15 +26,15 @@
 </script>
 
 <!-- Shared UI layer (playback engine, plots, controls). Needs React. -->
-<script src="labui.js"></script>
+<script src="labui.js?v=20261020"></script>
 <!-- Math layer, no DOM. Order matters: gas → solver → nozzle → facility → case → verify. -->
-<script src="gas.js"></script>
-<script src="solver.js"></script>
-<script src="nozzle.js"></script>
-<script src="boundary.js"></script>
-<script src="facility.js"></script>
-<script src="case.js"></script>
-<script src="verify.js"></script>
+<script src="gas.js?v=20261020"></script>
+<script src="solver.js?v=20261020"></script>
+<script src="nozzle.js?v=20261020"></script>
+<script src="boundary.js?v=20261020"></script>
+<script src="facility.js?v=20261020"></script>
+<script src="case.js?v=20261020"></script>
+<script src="verify.js?v=20261020"></script>
 </head>
 <body>
 <div id="root"><div class="boot">Loading...</div></div>
@@ -190,7 +191,7 @@ function TubeView({ sol, field, lo, hi, L, diaphragm, showDiaphragm, tracers, ho
     onHover(f < 0 || f > 1 ? null : f * L);
   };
   return <canvas ref={ref} className="stage-canvas" style={{ height: 132 }}
-                 onMouseMove={onMove} onMouseLeave={() => onHover(null)} />;
+                 onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={e => e.pointerType !== "touch" && onHover(null)} />;
 }
 
 // Keyboard shortcuts shared by both 1D workspaces.
@@ -626,7 +627,7 @@ function NozzleView({ sol, field, lo, hi, geom, hoverX, onHover, xThroat, xShock
     onHover(f < 0 || f > 1 ? null : f * g.L);
   };
   return <canvas ref={ref} className="stage-canvas" style={{ height: 190 }}
-                 onMouseMove={onMove} onMouseLeave={() => onHover(null)} />;
+                 onPointerMove={onMove} onPointerDown={onMove} onPointerLeave={e => e.pointerType !== "touch" && onHover(null)} />;
 }
 
 
@@ -1149,7 +1150,7 @@ function XTDiagram({ player, meta, analysis, fieldKey, range, L4, L1, runId, cur
   return (
     <div>
       <canvas ref={ref} className="stage-canvas" style={{ height: "min(56vh, 520px)" }}
-              onMouseMove={e => setHover(toXT(e))} onMouseLeave={() => setHover(null)}
+              onPointerMove={e => setHover(toXT(e))} onPointerLeave={e => e.pointerType !== "touch" && setHover(null)}
               onClick={e => { const p = toXT(e); if (p) onSeek(p.t); }} />
       <div className="stage-foot">
         <span className="xt-legend"><i className="ln-shock" />shock <i className="ln-contact" />contact <i className="ln-fan" />expansion
@@ -1620,7 +1621,7 @@ function VerifyApp({ onHelp }) {
               <span className="clock">grid {progress.grid + 1} / {progress.of} · N = {progress.N}</span>
             </div>
           )}
-          {!result && !progress && <div className="note">Pick a study and press <b>Run study</b>. Each grid runs in time slices, so the page stays responsive.</div>}
+          {!result && !progress && <div className="note">Pick a study and press <b>Run study</b> (on a phone, both are under <b>Parameters</b>). Each grid runs in time slices, so the page stays responsive.</div>}
 
           {ord && (
             <React.Fragment>

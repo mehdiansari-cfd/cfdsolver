@@ -46,6 +46,8 @@
   function readTheme() {
     const cs = getComputedStyle(document.documentElement);
     for (const k in THEME_TOKENS) { const v = cs.getPropertyValue(THEME_TOKENS[k]).trim(); if (v) THEME[k] = v; }
+    const meta = document.querySelector('meta[name="theme-color"]');   // phone browser bar matches the top bar
+    if (meta) meta.setAttribute("content", cs.getPropertyValue("--surface").trim());
   }
   function currentTheme() {
     const t = document.documentElement.dataset.theme;
@@ -559,8 +561,8 @@
           refArr ? h("i", { className: "sw-ref" }) : null, refArr ? (refLabel || "exact") : null,
           ref2 ? h("i", { className: "sw-ref2" }) : null, ref2 ? (ref2Label || "ref 2") : null,
           points ? h("i", { className: "sw-data" }) : null, points ? (pointsLabel || "data") : null) : null),
-      h("canvas", { ref: cvRef, className: "plot-canvas", onMouseMove: onMove,
-                    onMouseLeave: () => onHover && onHover(null) }));
+      h("canvas", { ref: cvRef, className: "plot-canvas", onPointerMove: onMove, onPointerDown: onMove,
+                    onPointerLeave: e => onHover && e.pointerType !== "touch" && onHover(null) }));
   }
 
   // ---------- Transport bar: solve / play / scrub / speed ----------
@@ -646,6 +648,26 @@
           h(Segmented, { label: "Theme", value: pref, options: THEME_OPTIONS, onChange: setTheme }))));
   }
 
+  // Phones: the control rail is a bottom sheet (lab.css, body.rail-open), so the
+  // results come first. This floating button opens it; choosing a preset closes it.
+  function RailSheetToggle() {
+    const [open, setOpen] = useState(false);
+    useEffect(() => {
+      document.body.classList.toggle("rail-open", open);
+      if (!open) return;
+      const onClick = e => { if (e.target.closest && e.target.closest(".rail .preset")) setOpen(false); };
+      const onKey = e => { if (e.key === "Escape") setOpen(false); };
+      document.addEventListener("click", onClick);
+      window.addEventListener("keydown", onKey);
+      return () => { document.removeEventListener("click", onClick); window.removeEventListener("keydown", onKey); };
+    }, [open]);
+    return h(React.Fragment, null,
+      open ? h("div", { className: "rail-scrim", onClick: () => setOpen(false), "aria-hidden": true }) : null,
+      h("button", { className: "rail-fab" + (open ? " on" : ""), type: "button", "aria-expanded": open,
+                    onClick: () => setOpen(!open) },
+        open ? "Show results" : "Parameters"));
+  }
+
   function TopBar({ active, scheme, onHelp }) {
     const [settingsOpen, setSettingsOpen] = useState(false);
     return h("header", { className: "topbar" },
@@ -660,7 +682,8 @@
           h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true },
             h("path", { d: GEAR_PATH }))),
         h("button", { className: "btn icon ghost", onClick: onHelp, title: "Help & shortcuts (?)", "aria-label": "Help" }, "?")),
-      h(SettingsDrawer, { open: settingsOpen, onClose: () => setSettingsOpen(false) }));
+      h(SettingsDrawer, { open: settingsOpen, onClose: () => setSettingsOpen(false) }),
+      h(RailSheetToggle));
   }
 
   function HelpDrawer({ open, onClose, children }) {
@@ -702,9 +725,11 @@
       h("span", null, fmt(hi, 3)));
   }
 
+  const COARSE_POINTER = !!(window.matchMedia && matchMedia("(pointer: coarse)").matches);   // touch screens
   // ---------- Probe readout (values at the hovered position) ----------
   function Probe({ items, where }) {
-    if (!items) return h("div", { className: "probe muted" }, "hover a plot or the field to probe values");
+    if (!items) return h("div", { className: "probe muted" }, COARSE_POINTER ? "drag sideways across a plot or the field to probe values"
+                                                                             : "hover a plot or the field to probe values");
     return h("div", { className: "probe" },
       h("span", { className: "muted" }, where),
       items.map(([k, v]) => h("span", { key: k }, h("span", { className: "muted" }, k + " "), fmt(v))));

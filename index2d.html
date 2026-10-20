@@ -3,12 +3,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#15181d">
 <title>Euler Lab · 2D</title>
 <script>
   // Apply a saved light / dark choice before first paint (otherwise the system setting decides).
   try { var t = localStorage.getItem("eulerlab-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
 </script>
-<link rel="stylesheet" href="lab.css">
+<link rel="stylesheet" href="lab.css?v=20261020">
 
 <!-- React + Babel from CDN (UI rendering only). Versions are pinned so an
      upstream release can never change or break the page. -->
@@ -25,9 +26,9 @@
 </script>
 
 <!-- Shared UI layer (playback engine, plots, controls). Needs React. -->
-<script src="labui.js"></script>
+<script src="labui.js?v=20261020"></script>
 <!-- 2D CFD solver (math layer, no DOM). Self-contained. -->
-<script src="solver2d.js"></script>
+<script src="solver2d.js?v=20261020"></script>
 </head>
 <body>
 <div id="root"><div class="boot">Loading...</div></div>
@@ -153,8 +154,8 @@ function Heatmap({ sol, field, lo, hi, Lx, Ly, smooth, cut, hover, onHover, onCu
     if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return null;
     return { x: fx * Lx, y: (1 - fy) * Ly };
   };
-  return <canvas ref={ref} className="stage-canvas" style={{ height: "min(68vh, 720px)" }}
-                 onMouseMove={e => onHover(toDomain(e))} onMouseLeave={() => onHover(null)}
+  return <canvas ref={ref} className="stage-canvas" style={{ height: "min(68vh, 720px, calc(100vw - 32px))" }}
+                 onPointerMove={e => onHover(toDomain(e))} onPointerLeave={e => e.pointerType !== "touch" && onHover(null)}
                  onClick={e => { const p = toDomain(e); if (p) onCut(p); }} />;
 }
 
