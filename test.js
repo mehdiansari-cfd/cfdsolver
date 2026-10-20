@@ -24,7 +24,8 @@
 const assert = require("assert");
 const S  = require("./solver");
 const G  = require("./gas");
-const Z  = require("./nozzle");   // pulls in what it needs from ./solver itself
+const Z  = require("./nozzle");
+const FA = require("./facility");   // pulls in what it needs from ./solver itself
 const S2 = require("./solver2d");
 
 let passed = 0;
@@ -337,6 +338,54 @@ check("tabulated area profile (PCHIP) reproduces the analytic CD nozzle", () => 
     const x = k / 400;
     assert(Math.abs(tab.A(x) - Z.nozzleArea(x, 1, 2, "CD")) < 2e-3, "A mismatch at x=" + x);
   }
+});
+
+// ---- 8. Shock-tube facility ------------------------------------------------
+// Calorically perfect gases must reproduce the classical closed forms
+// (Anderson, Modern Compressible Flow Ch. 7; Gaydon & Hurle 1963); the
+// thermally perfect analysis is cross-checked against the two-gas solver.
+
+console.log("Shock-tube facility (classical theory and two-gas simulation):");
+
+check("calorically perfect He -> air: shock-tube equation, p5/p2 and Mr relations hold", () => {
+  const He = G.gasModel("He", "calorically-perfect"), air = G.gasModel("air", "calorically-perfect");
+  const r = FA.facilityAnalysis({ driver: He, driven: air, p4: 20e5, T4: 300, p1: 5e3, T1: 300, L4: 2, L1: 5 });
+  const g1 = G.gasGamma(air, 300), g4 = G.gasGamma(He, 300), a1 = G.gasSound(air, 300), a4 = G.gasSound(He, 300);
+  const P = r.p2p1, Ms = r.Ms, Mr = r.reflected.Mr;
+  const p4p1 = P * Math.pow(1 - (g4 - 1) * (a1 / a4) * (P - 1) / Math.sqrt(2 * g1 * (2 * g1 + (g1 + 1) * (P - 1))), -2 * g4 / (g4 - 1));
+  assert(Math.abs(p4p1 / r.p4p1 - 1) < 1e-6, "p4/p1 " + p4p1 + " vs " + r.p4p1);
+  const p5p2 = (((3 * g1 - 1) / (g1 - 1)) * P - 1) / (P + (g1 + 1) / (g1 - 1));
+  assert(Math.abs(r.states[5].p / r.states[2].p / p5p2 - 1) < 1e-6, "p5/p2");
+  const rhs = Ms / (Ms * Ms - 1) * Math.sqrt(1 + 2 * (g1 - 1) / ((g1 + 1) * (g1 + 1)) * (Ms * Ms - 1) * (g1 + 1 / (Ms * Ms)));
+  assert(Math.abs(Mr / (Mr * Mr - 1) / rhs - 1) < 1e-6, "Mr relation");
+});
+
+check("facilityDesignP4 inverts the analysis", () => {
+  const base = { driver: "He", driven: "air", T4: 300, p1: 5e3, T1: 300, L4: 2, L1: 5 };
+  const p4 = FA.facilityDesignP4(base, 3.5);
+  assert(Math.abs(FA.facilityAnalysis(Object.assign({}, base, { p4 })).Ms - 3.5) < 1e-6);
+});
+
+check("two-gas simulation reproduces t_reflection, p5, T5 and the under-tailored wave", () => {
+  const cfg = { driver: "He", driven: "N2", T4: 300, p1: 5e3, T1: 300, L4: 3, L1: 6 };
+  cfg.p4 = FA.facilityDesignP4(cfg, 4.2);
+  const a = FA.facilityAnalysis(cfg), P = FA.facilitySimParams(cfg, 600);
+  const tW = a.times.shockAtWall, tA = a.interaction.arriveT;
+  assert.strictEqual(a.interaction.tailoring, "under-tailored");
+  let s = S.initState(P);
+  const wall = () => { const k = s.N + 1; return s.eos.prim(s.rho[k], s.mom[k], s.ene[k], s.rY[k]); };
+  const hist = [];
+  const tStop = tA + 0.3 * (a.expansion.arriveT - tA);
+  while (s.t < tStop) { s = S.stepUntil(s, Math.min(tStop, s.t + 2e-5)); const q = wall(); hist.push({ t: s.t, p: q.p, T: q.T }); }
+  const p5 = a.states[5].p, T5 = a.states[5].T;
+  const tRef = hist.find(h => h.p > 0.5 * (a.states[2].p + p5)).t;
+  assert(Math.abs(tRef / tW - 1) < 0.01, "reflection at " + tRef + " vs " + tW);
+  const mid = hist.filter(h => h.t > tW + 0.3 * (tA - tW) && h.t < tW + 0.7 * (tA - tW));
+  const pm = mid.reduce((acc, h) => acc + h.p, 0) / mid.length, Tm = mid.reduce((acc, h) => acc + h.T, 0) / mid.length;
+  assert(Math.abs(pm / p5 - 1) < 0.01, "p5 plateau " + pm + " vs " + p5);
+  assert(Math.abs(Tm / T5 - 1) < 0.01, "T5 plateau " + Tm + " vs " + T5);
+  // the reflected shock from the contact raises the end-wall pressure afterwards
+  assert(hist[hist.length - 1].p > 1.2 * p5, "no pressure rise after the interaction wave");
 });
 
 // ---- summary ---------------------------------------------------------------
