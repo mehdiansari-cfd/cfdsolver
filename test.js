@@ -417,6 +417,36 @@ check("run.js: sod.json → CSV + summary; --set and --sweep work", () => {
   assert(fs.existsSync(path.join(out, "sod.sweep.csv")));
 });
 
+// ---- 10. Verification tooling: order of accuracy and GCI ---------------------
+
+console.log("Verification (order of accuracy, grid convergence index):");
+
+const V = require("./verify");
+
+check("GCI recovers p = 2 and the exact limit from f = 1 + 0.3 h^2 + 0.05 h^3 (r = 2 and 1.5)", () => {
+  const f = h => 1 + 0.3 * h * h + 0.05 * h * h * h;
+  for (const r of [2, 1.5]) {
+    const g = V.gci3(f(0.01), f(0.01 * r), f(0.01 * r * r), 0.01, 0.01 * r, 0.01 * r * r);
+    assert(Math.abs(g.p - 2) < 0.01, "p = " + g.p);
+    assert(Math.abs(g.fExt - 1) < 1e-6, "fExt = " + g.fExt);
+    assert.strictEqual(g.convergence, "monotone");
+  }
+});
+
+check("smooth periodic wave: MUSCL + SSP-RK2 reaches 2nd order in L1 (pairwise > 1.8)", () => {
+  const o = V.orderStudy("smooth-advection", [50, 100, 200, 400]);
+  const last = o.order.L1.pairwise[o.order.L1.pairwise.length - 1];
+  assert(last > 1.8, "finest pairwise L1 order " + last.toFixed(3));
+});
+
+check("GCI bands contain the exact answer: shock position (nozzle) and rho_2 (real-gas tube)", () => {
+  for (const name of ["nozzle-shock-position", "shocktube-plateau"]) {
+    const r = V.gciStudy(name, [100, 200, 400]);
+    assert(r.referenceInsideBand, name + ": exact " + r.reference + " outside " + r.band.join(" … "));
+    assert(r.gci.convergence === "monotone", name + ": " + r.gci.convergence);
+  }
+});
+
 // ---- summary ---------------------------------------------------------------
 
 console.log("");

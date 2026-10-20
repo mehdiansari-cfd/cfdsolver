@@ -1,0 +1,18 @@
+{
+  "_comment": "Fill the null values from the NPARC case description before running. Units: Pa, K.",
+  "gas": { "name": "air", "model": "thermally-perfect" },
+  "p0": null,
+  "T0": null,
+  "numerics": { "N": 400, "cfl": 0.4, "flux": "HLLC", "steadyTol": 1e-6, "maxTransits": 400 },
+  "geometry": {
+    "upper": "data/upper.pts",
+    "lower": "data/lower.pts",
+    "columns": { "x": 0, "y": 1 }
+  },
+  "cases": {
+    "weak":   { "file": "data/sajwpres.data", "exitPressureRatio": null,
+                "columns": { "x": 0, "p": 1 }, "xScale": "throat-heights", "pIsRatio": true },
+    "strong": { "file": "data/sajspres.data", "exitPressureRatio": null,
+                "columns": { "x": 0, "p": 1 }, "xScale": "throat-heights", "pIsRatio": true }
+  }
+}
