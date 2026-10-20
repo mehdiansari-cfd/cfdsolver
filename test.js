@@ -388,6 +388,35 @@ check("two-gas simulation reproduces t_reflection, p5, T5 and the under-tailored
   assert(hist[hist.length - 1].p > 1.2 * p5, "no pressure rise after the interaction wave");
 });
 
+// ---- 9. Case files and the command-line runner --------------------------------
+
+console.log("Case files, CSV and the CLI (node run.js):");
+
+const CASE = require("./case");
+const fs = require("fs"), os = require("os"), path = require("path");
+const { execFileSync } = require("child_process");
+
+check("case validation reports bad input clearly", () => {
+  assert.throws(() => CASE.normalizeCase({ kind: "rocket" }), /kind/);
+  assert.throws(() => CASE.normalizeCase({ kind: "shocktube", gas: "air", L: 1, diaphragm: 0.5, tEnd: 1e-3,
+                                            left: { p: 1e5, u: 0 }, right: { p: 1e5, T: 300, u: 0 } }), /left: 'T'/);
+  assert.throws(() => CASE.resolveGas("unobtainium"), /Unknown gas/);
+});
+
+check("run.js: sod.json → CSV + summary; --set and --sweep work", () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "cfd-run-"));
+  const summary = JSON.parse(execFileSync(process.execPath, ["run.js", "cases/sod.json", "--out", out, "--quiet", "--set", "numerics.N=200"]));
+  assert(summary.L1rhoRelative < 1e-2, "L1 " + summary.L1rhoRelative);
+  const csv = fs.readFileSync(path.join(out, "sod.csv"), "utf8").trim().split("\n").filter(l => !l.startsWith("#"));
+  assert.strictEqual(csv.length, 201, "200 rows + header");
+  assert(/^x,rho,u,p,T,M,a,e,s$/.test(csv[0]), "header " + csv[0]);
+  const sweep = execFileSync(process.execPath, ["run.js", "cases/sod.json", "--out", out, "--quiet",
+                                                "--set", "numerics.N=100", "--sweep", "numerics.flux=\"HLLC\",\"Rusanov\""]).toString();
+  const rows = sweep.trim().split("\n");
+  assert.strictEqual(rows.length, 3, sweep);
+  assert(fs.existsSync(path.join(out, "sod.sweep.csv")));
+});
+
 // ---- summary ---------------------------------------------------------------
 
 console.log("");

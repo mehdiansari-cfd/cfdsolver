@@ -1,0 +1,9 @@
+{
+  "kind": "facility",
+  "name": "he-n2-tailored",
+  "driver": "He", "driven": "N2", "thermo": "thermally-perfect",
+  "p4": 376e3, "T4": 300, "p1": 5e3, "T1": 300, "L4": 3, "L1": 6,
+  "simulate": true,
+  "numerics": { "N": 600, "cfl": 0.4, "flux": "HLLC" },
+  "output": { "probes": [8.99] }
+}

@@ -1,0 +1,10 @@
+{
+  "kind": "shocktube",
+  "name": "sod",
+  "gas": { "gamma": 1.4 },
+  "left":  { "rho": 1.0,   "u": 0, "p": 1.0 },
+  "right": { "rho": 0.125, "u": 0, "p": 0.1 },
+  "L": 1, "diaphragm": 0.5, "bc": "transmissive",
+  "numerics": { "N": 400, "cfl": 0.4, "flux": "HLLC" },
+  "tEnd": 0.2
+}
