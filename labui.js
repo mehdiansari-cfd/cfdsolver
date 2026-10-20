@@ -24,7 +24,7 @@
 (function () {
   "use strict";
   const h = React.createElement;
-  const { useState, useEffect, useRef, useCallback } = React;
+  const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
   // ---------- Theme (mirrors lab.css tokens; canvases can't read CSS vars cheaply) ----------
   const THEME = {
@@ -32,7 +32,8 @@
     grid:     "#1f242b",
     axis:     "#3a414c",
     tick:     "#7d8794",
-    series:   "#e2724b",   // numerical solution — one role, one colour, every plot
+    series:   "#d9653f",   // numerical solution — one role, one colour, every plot
+    data:     "#4a8fe0",   // measured / imported data points (validated vs series on plotBg)
     ref:      "#98a0ab",   // analytical reference — neutral, dashed
     cursor:   "#d7a33c",
     font:     "10px ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace"
@@ -339,6 +340,7 @@
     if (!o.x || o.x.length < 2 || pw <= 0 || ph <= 0) return null;
 
     const tr = o.logY ? (v => Math.log10(Math.max(v, 1e-300))) : (v => v);
+    const pts = o.points || null;
     let lo = tr(o.lo), hi = tr(o.hi);
     if (!(hi > lo)) { const c = Number.isFinite(lo) ? lo : 0; lo = c - 0.5; hi = c + 0.5; }
     // A nearly constant series (e.g. steady mass flow) spans at least
@@ -391,6 +393,15 @@
     };
     if (o.ref) line(o.ref, THEME.ref, 1.25, [4, 3]);
     line(o.y, THEME.series, 2);
+    if (pts) {                                   // measured data: hollow 8 px markers with a surface ring
+      for (const q of pts) {
+        if (!Number.isFinite(q.y) || q.x < xMin || q.x > xMax) continue;
+        const px = X(q.x), py = Y(q.y);
+        ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2);
+        ctx.lineWidth = 4; ctx.strokeStyle = THEME.plotBg; ctx.stroke();
+        ctx.lineWidth = 1.75; ctx.strokeStyle = THEME.data; ctx.stroke();
+      }
+    }
 
     // linked hover cursor
     let hit = null;
@@ -468,13 +479,20 @@
   // Canvas line plot with a linked hover cursor and a live readout.
   // Hovering reports a domain x through onHover so every plot (and the
   // field view) can show the same probe position.
-  function PlotCard({ title, x, y, refY: refArr, hoverX, onHover, resetKey, logY, refLabel, wide }) {
-    const [rlo, rhi] = finiteRange(logY ? [y] : [y, refArr]);
+  // yScale converts SI values for display (e.g. 1e-3 for Pa → kPa); points are
+  // measured data [{x, y}] in display units, drawn as hollow markers.
+  function PlotCard({ title, x, y: yRaw, refY: refRaw, hoverX, onHover, resetKey, logY, refLabel, wide,
+                      yScale, points, pointsLabel }) {
+    const sc = yScale || 1;
+    const y = useMemo(() => (sc === 1 || !yRaw ? yRaw : Array.from(yRaw, v => v * sc)), [yRaw, sc]);
+    const refArr = useMemo(() => (sc === 1 || !refRaw ? refRaw : Array.from(refRaw, v => v * sc)), [refRaw, sc]);
+    const ptsY = points ? points.map(q => q.y) : null;
+    const [rlo, rhi] = finiteRange(logY ? [y] : [y, refArr, ptsY]);
     const [lo, hi] = useSmoothRange(rlo, rhi, resetKey);
     const geo = useRef(null);
     const cvRef = useCanvas((ctx, W, H) => {
-      geo.current = drawPlot(ctx, W, H, { x, y, ref: refArr, lo, hi, logY, hoverX });
-    }, [x, y, refArr, lo, hi, logY, hoverX]);
+      geo.current = drawPlot(ctx, W, H, { x, y, ref: refArr, lo, hi, logY, hoverX, points });
+    }, [x, y, refArr, lo, hi, logY, hoverX, points]);
 
     const onMove = e => {
       const g = geo.current; if (!g || !onHover) return;
@@ -494,9 +512,10 @@
       h("figcaption", null,
         h("span", { className: "plot-title" }, title),
         readout,
-        refArr ? h("span", { className: "legend" },
+        refArr || points ? h("span", { className: "legend" },
           h("i", { className: "sw-num" }), "numerical",
-          h("i", { className: "sw-ref" }), refLabel || "exact") : null),
+          refArr ? h("i", { className: "sw-ref" }) : null, refArr ? (refLabel || "exact") : null,
+          points ? h("i", { className: "sw-data" }) : null, points ? (pointsLabel || "data") : null) : null),
       h("canvas", { ref: cvRef, className: "plot-canvas", onMouseMove: onMove,
                     onMouseLeave: () => onHover && onHover(null) }));
   }
@@ -507,7 +526,9 @@
     idle: "idle", computing: "computing", playing: "playing",
     buffering: "buffering", ready: "ready", error: "error", stale: "params changed"
   };
-  function Transport({ player, stale, onSolve, onPlay, info }) {
+  // tUnit = { scale, label } shows time in display units (e.g. ms for SI runs).
+  function Transport({ player, stale, onSolve, onPlay, info, tUnit }) {
+    const ts = tUnit ? tUnit.scale : 1, tl = tUnit ? " " + tUnit.label : "";
     const p = player;
     const status = stale ? "stale" : (p ? p.status() : "idle");
     const tEnd = p ? p.tEnd : 1;
@@ -536,8 +557,8 @@
                     onChange: e => p && p.setSpeed(parseFloat(e.target.value)) },
         SPEEDS.map(s => h("option", { key: s, value: s }, s + "×"))),
       h("div", { className: "clock" },
-        h("span", null, h("span", { className: "muted" }, "t "), fmt(cursor, 4)),
-        h("span", { className: "muted" }, " / " + fmt(tEnd, 3))),
+        h("span", null, h("span", { className: "muted" }, "t "), fmt(cursor * ts, 4)),
+        h("span", { className: "muted" }, " / " + fmt(tEnd * ts, 3) + tl)),
       info ? h("div", { className: "meta" }, info) : null,
       h("span", { className: "chip chip-" + status }, STATUS_TEXT[status] || status));
   }
@@ -547,6 +568,8 @@
     const tabs = [
       { id: "shocktube", label: "Shock tube", href: "index.html#shocktube" },
       { id: "nozzle",    label: "Nozzle",     href: "index.html#nozzle" },
+      { id: "facility",  label: "Facility",   href: "index.html#facility" },
+      { id: "verify",    label: "Verify",     href: "index.html#verify" },
       { id: "2d",        label: "2D field",   href: "index2d.html" }
     ];
     return h("header", { className: "topbar" },
@@ -605,9 +628,64 @@
       items.map(([k, v]) => h("span", { key: k }, h("span", { className: "muted" }, k + " "), fmt(v))));
   }
 
+  // ---------- Files: download text, pick a local text file ----------
+  function downloadText(name, text, mime) {
+    const url = URL.createObjectURL(new Blob([text], { type: mime || "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function pickTextFile(accept) {
+    return new Promise((resolve, reject) => {
+      const inp = document.createElement("input");
+      inp.type = "file"; inp.accept = accept || "";
+      inp.onchange = () => {
+        const f = inp.files && inp.files[0];
+        if (!f) return reject(new Error("No file chosen"));
+        f.text().then(text => resolve({ name: f.name, text }), reject);
+      };
+      inp.click();
+    });
+  }
+  // Rows of a CSV / whitespace table whose cells are all numbers (headers skipped).
+  function numericTable(text) {
+    const rows = [];
+    for (const line of text.split(/\r?\n/)) {
+      const cells = line.trim().split(/[\s,;]+/).filter(Boolean).map(Number);
+      if (cells.length >= 2 && cells.every(Number.isFinite)) rows.push(cells);
+    }
+    return rows;
+  }
+
+  // ---------- Drive a generator in time slices between animation frames ----------
+  // onYield(value) after each slice; onDone(result) / onError(err). Returns cancel().
+  function runSliced(gen, onYield, onDone, onError, sliceMs) {
+    let dead = false, raf = null;
+    const budget = sliceMs || 12;
+    const tick = () => {
+      raf = null;
+      if (dead) return;
+      const t0 = performance.now();
+      try {
+        let last;
+        while (performance.now() - t0 < budget) {
+          const r = gen.next();
+          if (r.done) { onDone(r.value); return; }
+          last = r.value;
+        }
+        if (last !== undefined) onYield(last);
+      } catch (e) { onError(e); return; }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => { dead = true; if (raf) cancelAnimationFrame(raf); };
+  }
+
   window.LabUI = {
     THEME, fmt, niceTicks, CMAP, colormap,
     Player, usePlayer, fitCanvas, useCanvas, useSmoothRange, finiteRange, drawPlot, useShortcuts,
-    NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe
+    NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe,
+    downloadText, pickTextFile, numericTable, runSliced
   };
 })();

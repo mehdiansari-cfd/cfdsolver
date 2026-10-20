@@ -337,10 +337,39 @@ select option { background: var(--field); color: var(--ink); }
 .readout { font-variant-numeric: tabular-nums; }
 .legend { margin-left: auto; display: flex; align-items: center; gap: 5px; color: var(--muted); font-size: 10px; }
 .legend i { display: inline-block; width: 14px; height: 0; margin-left: 6px; }
-.sw-num { border-top: 2px solid var(--accent); }
+.sw-num { border-top: 2px solid #d9653f; }
+.legend i.sw-data { width: 8px; height: 8px; border: 1.75px solid #4a8fe0; border-radius: 50%; }
 .sw-ref { border-top: 1.5px dashed #98a0ab; }
 .plot-canvas { display: block; width: 100%; height: 170px; cursor: crosshair; }
 .plot-card.wide { grid-column: 1 / -1; }
+
+/* ---------------- Result tiles and tables ---------------- */
+.metrics {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 1px; background: var(--line); border-bottom: 1px solid var(--line);
+}
+.metrics > div { background: var(--surface); padding: 10px 12px; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.metrics span { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.metrics b { font-size: 15px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.metrics small { color: var(--muted); font-size: 10px; }
+.ok { color: var(--ok); }
+.table-wrap { overflow-x: auto; }
+.states-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.states-table th, .states-table td { padding: 6px 10px; text-align: right; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.states-table th:first-child, .states-table td:first-child { text-align: left; color: var(--muted); }
+.states-table thead th { color: var(--muted); font-weight: 500; font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; }
+code { font-family: var(--font-mono); font-size: 11px; background: var(--field); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+
+/* ---------------- Progress, x–t legend, toast ---------------- */
+.progress { flex: 1 1 200px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.progress i { display: block; height: 100%; background: var(--accent-2); transition: width 120ms linear; }
+.xt-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; font-size: 10px; color: var(--muted); }
+.xt-legend i { display: inline-block; width: 18px; height: 0; margin-right: -4px; }
+.xt-legend .ln-shock { border-top: 1.5px solid #fff; }
+.xt-legend .ln-contact { border-top: 1.5px dashed #fff; }
+.xt-legend .ln-fan { border-top: 1.5px dotted #fff; }
+.xt-legend .ln-test { width: 4px; height: 12px; background: var(--accent-2); }
+.toast { position: fixed; top: 56px; right: 16px; z-index: 60; max-width: 420px; cursor: pointer; }
 
 /* ---------------- Help drawer ---------------- */
 .drawer-backdrop {

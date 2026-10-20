@@ -13,6 +13,7 @@
      "name": "air 10:1",
      "gas": "air" | { "name": "air", "model": "thermally-perfect" | "calorically-perfect" }
             | { "gamma": 1.4 },
+     ("gasLeft" + "gasRight" instead of "gas": two gases, e.g. a He driver into air)
      "left":  { "p": 1e6, "T": 300, "u": 0 },   (non-dim: { "rho", "u", "p" })
      "right": { "p": 1e5, "T": 300, "u": 0 },
      "L": 1, "diaphragm": 0.5, "bc": "transmissive" | "reflective" | "periodic",
@@ -74,7 +75,12 @@ function normalizeCase(input) {
   if (c.kind === "shocktube") {
     _need(c, ["L", "diaphragm", "tEnd"], "shocktube");
     c.bc = c.bc || "transmissive";
-    const legacy = resolveGas(c.gas, c.thermo).gamma != null;
+    if (c.gasLeft || c.gasRight) {
+      if (!c.gasLeft || !c.gasRight) throw new Error("shocktube: give both gasLeft and gasRight (or just gas).");
+      if (resolveGas(c.gasLeft, c.thermo).gamma != null || resolveGas(c.gasRight, c.thermo).gamma != null)
+        throw new Error("shocktube: gasLeft / gasRight must be real gases, not { gamma }.");
+    }
+    const legacy = !c.gasLeft && resolveGas(c.gas, c.thermo).gamma != null;
     _need(c.left, legacy ? ["rho", "u", "p"] : ["p", "T", "u"], "left");
     _need(c.right, legacy ? ["rho", "u", "p"] : ["p", "T", "u"], "right");
   } else if (c.kind === "nozzle") {
@@ -98,7 +104,8 @@ function normalizeCase(input) {
 function caseToParams(c) {
   const num = c.numerics;
   if (c.kind === "shocktube") {
-    const g = resolveGas(c.gas, c.thermo);
+    const g = c.gasLeft ? { gasLeft: resolveGas(c.gasLeft, c.thermo).gas, gasRight: resolveGas(c.gasRight, c.thermo).gas }
+                        : resolveGas(c.gas, c.thermo);
     return Object.assign({ N: num.N, L: c.L, cfl: num.cfl, flux: num.flux, diaphragm: c.diaphragm,
                            bcType: c.bc, leftState: c.left, rightState: c.right }, g);
   }
@@ -205,11 +212,11 @@ function runCase(input, onProgress) {
 
   // Reference solution and scalar outputs
   if (c.kind === "shocktube") {
-    const g = resolveGas(c.gas, c.thermo);
+    const gL = P.gasLeft || P.gas, gR = P.gasRight || P.gas;
     if (c.bc === "transmissive") {
-      out.exact = g.gas
-        ? exactRiemannGas(g.gas, c.left, g.gas, c.right, c.diaphragm, s.t, out.final.x)
-        : exactRiemann(c.left, c.right, g.gamma, c.diaphragm, s.t, out.final.x);
+      out.exact = gL
+        ? exactRiemannGas(gL, c.left, gR, c.right, c.diaphragm, s.t, out.final.x)
+        : exactRiemann(c.left, c.right, P.gamma, c.diaphragm, s.t, out.final.x);
       if (out.exact) {
         let l1 = 0, rmax = 0;
         for (let i = 0; i < out.final.x.length; i++) { l1 += Math.abs(out.final.rho[i] - out.exact.rho[i]); rmax = Math.max(rmax, out.exact.rho[i]); }

@@ -45,6 +45,7 @@ if (typeof initState === "undefined" && typeof require === "function") {
 const GCI_SAFETY = 1.25;        // Celik et al. 2008: Fs = 1.25 for three-grid studies
 const CHUNK_T = 0.02;           // fraction of a run between progress yields
 const STEADY_MAX_TRANSITS = 400;
+const STEADY_SUBCHUNKS = 40;    // solver calls per flow-through time between yields
 const SHOCK_TOL = 1e-6;         // steady tolerance for the shock-position study
 const GCI_P_ITERS = 100;
 const SMOOTH_AMPLITUDE = 0.2;
@@ -165,12 +166,16 @@ function orderStudy(name, Ns, flux) { return runToEnd(orderStudyGen(name, Ns, fl
 function* _nozzleRunSteady(q, N, tol) {
   let s = initNozzleState(Object.assign({}, q, { N }));
   const transit = s.L / Math.sqrt(1.4 * s.T0);
-  let prev = s.rho.slice(), t = transit;
+  let prev = s.rho.slice(), t = transit, progress = 0;
   for (let k = 0; k < STEADY_MAX_TRANSITS; k++) {
-    for (let j = 1; j <= 10; j++) { s = nozzleStepUntil(s, t - transit + j * transit / 10); }
+    for (let j = 1; j <= STEADY_SUBCHUNKS; j++) {             // yield often: keeps a page responsive
+      s = nozzleStepUntil(s, t - transit + j * transit / STEADY_SUBCHUNKS);
+      yield progress;
+    }
     let d = 0, m = 0;
     for (let i = 2; i < N + 2; i++) { d += Math.abs(s.rho[i] - prev[i]); m += s.rho[i]; }
-    yield Math.min(0.99, Math.log10(m / d) / Math.log10(1 / tol));
+    progress = Math.max(0, Math.min(0.99, Math.log10(m / d) / Math.log10(1 / tol)));
+    yield progress;
     if (d / m < tol) break;
     prev = s.rho.slice(); t += transit;
   }

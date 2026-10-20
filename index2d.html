@@ -34,8 +34,22 @@ window.__eulerBooted = true;
 const { useState, useEffect, useMemo, useRef } = React;
 const {
   fmt, CMAP, useCanvas, useSmoothRange, finiteRange, usePlayer, useShortcuts,
-  NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe
+  NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe,
+  downloadText
 } = LabUI;
+
+// Interior fields of a 2D snapshot as CSV, one row per cell (non-dimensional).
+function fields2DToCSV(sol, t, preset) {
+  const lines = ["# case: " + preset + " (2D, non-dimensional)", "# t = " + t, "x,y,rho,u,v,p,M"];
+  const f = v => Number(v.toPrecision(9));
+  for (let j = 0; j < sol.Ny; j++) {
+    for (let i = 0; i < sol.Nx; i++) {
+      const k = j * sol.Nx + i;
+      lines.push([f(sol.xs[i]), f(sol.ys[j]), f(sol.rho[k]), f(sol.u[k]), f(sol.v[k]), f(sol.p[k]), f(sol.M[k])].join(","));
+    }
+  }
+  return lines.join("\n") + "\n";
+}
 
 const FLUX_OPTIONS = ["HLLC", "HLL", "Roe", "Rusanov"];
 const CFL_SAFE = 0.5;
@@ -296,6 +310,12 @@ function App() {
             <Toggle checked={smooth} onChange={setSmooth} label="smooth interpolation" />
             <Toggle checked={showSlices} onChange={setShowSlices} label="line-outs along the cuts" />
             <button className="btn" onClick={() => setCutF({ x: 0.5, y: 0.5 })}>Reset cuts to centre</button>
+          </Section>
+          <Section title="Export">
+            <button className="btn" disabled={!sol}
+                    onClick={() => downloadText(preset.replace(/[^A-Za-z0-9._-]+/g, "_") + "_t=" + frame.t.toExponential(3) + ".csv",
+                                                fields2DToCSV(sol, frame.t, preset), "text/csv")}>Export CSV (current time)</button>
+            <div className="note">All cells: x, y, ρ, u, v, p, M (non-dimensional).</div>
           </Section>
         </aside>
 
