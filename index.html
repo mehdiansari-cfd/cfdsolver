@@ -26,6 +26,7 @@
 <script src="gas.js"></script>
 <script src="solver.js"></script>
 <script src="nozzle.js"></script>
+<script src="boundary.js"></script>
 <script src="facility.js"></script>
 <script src="case.js"></script>
 <script src="verify.js"></script>
@@ -658,7 +659,7 @@ const REGIME_TEXT = {
 function nzFromPreset(q) {
   return { gas: q.gas || "ideal", thermo: q.thermo || "thermally-perfect", type: q.type, AR: q.AR, L: q.L,
            Athroat: q.Athroat || 1e-3, table: null, p0: q.p0, T0: q.T0, pb: q.pb, N: q.N, cfl: q.cfl, tEnd: q.tEnd,
-           gamma: q.gamma || 1.4, branch: q.branch || "auto" };
+           gamma: q.gamma || 1.4, branch: q.branch || "auto", bl: null };
 }
 function nzFromCase(c) {
   const g = c.gas || {}, legacy = typeof g.gamma === "number", geo = c.geometry || {};
@@ -667,7 +668,20 @@ function nzFromCase(c) {
            type: geo.type || "CD", AR: geo.AR || 2, L: table ? table.x[table.x.length - 1] - table.x[0] : geo.L,
            Athroat: geo.Athroat || 1e-3, table, p0: c.p0, T0: c.T0, pb: c.pb,
            N: (c.numerics && c.numerics.N) || 300, cfl: (c.numerics && c.numerics.cfl) || 0.4,
-           tEnd: c.tEnd || (c.steady && c.steady.tMax) || 0.01, gamma: legacy ? g.gamma : 1.4, branch: "auto" };
+           tEnd: c.tEnd || (c.steady && c.steady.tMax) || 0.01, gamma: legacy ? g.gamma : 1.4, branch: "auto",
+           bl: c.boundaryLayer || null };
+}
+const BL_DEFAULTS = { geometry: "channel", span: 0.1, nWalls: 2, theta0: 0 };
+const MM = 1e3;
+// y(x) on another grid, linear (for overlaying a solution computed on its own stations)
+function resample(X, Y, xs) {
+  let k = 1;
+  return xs.map(x => {
+    while (k < X.length - 1 && X[k] < x) k++;
+    while (k > 1 && X[k - 1] > x) k--;
+    const w = Math.max(0, Math.min(1, (x - X[k - 1]) / (X[k] - X[k - 1])));
+    return Y[k - 1] + w * (Y[k] - Y[k - 1]);
+  });
 }
 
 function NozzleApp({ onHelp, initialCase, onLoadCase }) {
@@ -692,6 +706,10 @@ function NozzleApp({ onHelp, initialCase, onLoadCase }) {
   const [branch, setBranch]     = useState(init.branch);
   const [showIso, setShowIso]   = useState(true);
   const [measured, setMeasured] = useState(null);       // { name, pts: [{x, y}] } p/p0 vs x
+  const [blOn, setBlOn]         = useState(!!init.bl);
+  const [bl, setBl]             = useState(Object.assign({}, BL_DEFAULTS, init.bl || {}));
+  const [viscous, setViscous]   = useState(null);       // { key, result } or { key, pass } while coupling
+  const [blErr, setBlErr]       = useState(null);
   const [hoverX, setHoverX]     = useState(null);
   const [err, setErr]           = useState(null);
 
@@ -741,6 +759,7 @@ function NozzleApp({ onHelp, initialCase, onLoadCase }) {
     setGas(q.gas); setThermo(q.thermo); setNozzType(q.type); setAR(q.AR); setLdom(q.L); setAthroat(q.Athroat);
     setTable(q.table); setP0(q.p0); setT0(q.T0); setPb(q.pb); setN(q.N); setCfl(q.cfl); setTEnd(q.tEnd);
     setGamma(q.gamma); setBranch(q.branch);
+    setBlOn(!!q.bl); setBl(Object.assign({}, BL_DEFAULTS, q.bl || {}));
   };
   const loadPreset = name => {
     const q = nzFromPreset(NOZZLE_PRESETS[name]);
@@ -791,6 +810,29 @@ function NozzleApp({ onHelp, initialCase, onLoadCase }) {
   }, [meta, branch]);
   const res = useResiduals(player, solved.current.run);
 
+  // Displacement correction (boundary.js): steady coupled solution for the solved
+  // spec, run in time slices so the page stays responsive.
+  const blKey = meta && blOn && SP && !SP.legacy ? solved.current.run + JSON.stringify(bl) : null;
+  useEffect(() => {
+    setBlErr(null);
+    if (!blKey) { setViscous(null); return; }
+    if (!(bl.theta0 >= 0) || (bl.geometry === "channel" && !(bl.span > 0))) { setBlErr("Span must be positive and θ₀ ≥ 0."); return; }
+    setViscous({ key: blKey, pass: 0 });
+    const gen = viscousQuasi1DGen(buildParams(SP), bl);
+    return runSliced(gen, v => setViscous({ key: blKey, pass: v.step + 1 }),
+                     result => setViscous({ key: blKey, result }),
+                     e => { setViscous(null); setBlErr(e.message); });
+    /* eslint-disable-next-line */
+  }, [blKey]);
+  const vres = viscous && viscous.key === blKey ? viscous.result : null;
+  const visc = useMemo(() => {
+    if (!vres || !sol) return null;
+    const v = vres.solution, X = v.x, xs = sol.x;
+    return { M: resample(X, v.M, xs), pr: resample(X, v.p, xs).map(q => q / meta.p0), T: resample(X, v.T, xs),
+             rho: resample(X, v.rho, xs), ptr: resample(X, v.pt, xs).map(q => q / meta.p0), mdot: resample(X, v.mdot, xs),
+             dsMM: resample(vres.x, vres.deltaStar, xs).map(q => q * MM), H: resample(vres.bl.x, vres.bl.H, xs) };
+  }, [vres, sol]);
+
   const field = !sol ? null : viewMode === "pressure" ? sol.p : viewMode === "temp" ? sol.T
               : viewMode === "density" ? sol.rho : sol.M;
   const [flo, fhi] = finiteRange([field]);
@@ -808,8 +850,10 @@ function NozzleApp({ onHelp, initialCase, onLoadCase }) {
   const toCase = S => {
     const geometry = S.table ? { type: "table", x: S.table.x, A: S.table.A }
                              : { type: S.type, AR: S.AR, L: S.L, Athroat: S.legacy ? 1 : S.Athroat };
-    return { kind: "nozzle", name: preset || "nozzle", gas: S.legacy ? { gamma: S.gamma } : { name: S.gas, model: S.thermo },
-             geometry, p0: S.p0, T0: S.T0, pb: S.pb, numerics: { N: S.N, cfl: S.cfl, flux: S.flux }, tEnd: S.tEnd };
+    const c = { kind: "nozzle", name: preset || "nozzle", gas: S.legacy ? { gamma: S.gamma } : { name: S.gas, model: S.thermo },
+                geometry, p0: S.p0, T0: S.T0, pb: S.pb, numerics: { N: S.N, cfl: S.cfl, flux: S.flux }, tEnd: S.tEnd };
+    if (blOn && !S.legacy) c.boundaryLayer = Object.assign({}, bl);
+    return c;
   };
   const saveCase = () => downloadText(safeName(preset) + ".json", JSON.stringify(toCase(spec), null, 2) + "\n", "application/json");
   const exportCSV = () => {
@@ -822,6 +866,7 @@ function NozzleApp({ onHelp, initialCase, onLoadCase }) {
   const plot = (title, key, withRef, extra) => (
     <PlotCard key={key} title={title} x={sol.x} y={sol[key]}
               refY={withRef && showIso && exact ? exact[key] : null} refLabel="exact quasi-1D"
+              ref2={withRef && visc ? visc[key] : null} ref2Label="+ boundary layer"
               hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} {...(extra || {})} />
   );
   const modeLabel = { Mach: "Mach M", pressure: "pressure p", temp: "temperature T", density: "density ρ" }[viewMode];
@@ -907,6 +952,32 @@ function NozzleApp({ onHelp, initialCase, onLoadCase }) {
                                    { value: "subsonic", label: "force choked, subsonic branch" },
                                    { value: "supersonic", label: "force choked, supersonic branch" }]} />
           </Section>
+          {!legacy && (
+            <Section title="Boundary layer" aside={blOn ? "displacement" : "off"}>
+              <Toggle checked={blOn} onChange={setBlOn} label="displacement correction (turbulent, integral)" />
+              {blOn && (
+                <React.Fragment>
+                  <SelectField label="Cross-section" value={bl.geometry} onChange={v => setBl(Object.assign({}, bl, { geometry: v }))}
+                               options={[{ value: "channel", label: "channel: A = span × height" },
+                                         { value: "axisymmetric", label: "axisymmetric: A = πr²" }]} />
+                  <div className="grid-3">
+                    {bl.geometry === "channel" && <NumField label="span [cm]" value={+(bl.span * 100).toPrecision(8)} onChange={v => setBl(Object.assign({}, bl, { span: v / 100 }))} step={1} />}
+                    {bl.geometry === "channel" && <NumField label="walls" value={bl.nWalls} onChange={v => setBl(Object.assign({}, bl, { nWalls: Math.max(1, Math.min(2, Math.round(v))) }))} step={1} />}
+                    <NumField label="θ₀ inlet [mm]" value={+(bl.theta0 * MM).toPrecision(8)} onChange={v => setBl(Object.assign({}, bl, { theta0: v / MM }))} step={0.1} />
+                  </div>
+                  <div className="note">
+                    {blErr ? <span style={{ color: "var(--accent-2)" }}>{blErr}</span>
+                     : !vres ? (viscous ? "Coupling… pass " + (viscous.pass || 0) : "Solve to couple.")
+                     : (vres.reliable ? "Converged" : vres.separated ? "Boundary layer separates: shock position not a reliable prediction"
+                                                    : "No steady attached state matches p_b")
+                       + (vres.xShock != null ? " · shock at x = " + sig(vres.xShock, 4) + " m (inviscid " + sig(vres.xShockInviscid, 4) + ")" : "")
+                       + " · ṁ " + sig(vres.solution.mdot[0], 4) + " kg/s."}
+                  </div>
+                  <div className="note">Teal dashed curves: exact quasi-1D on A − δ*. θ₀ is the momentum thickness entering the duct — usually unknown; vary it.</div>
+                </React.Fragment>
+              )}
+            </Section>
+          )}
           <Section title="Measured data">
             <div className="grid-2">
               <button className="btn" onClick={loadMeasured}>Load p/p₀ CSV…</button>
@@ -952,6 +1023,14 @@ function NozzleApp({ onHelp, initialCase, onLoadCase }) {
               {plot(si ? "density ρ [kg/m³]" : "density ρ", "rho", true)}
               {plot("total-pressure ratio p₀/p₀,in", "ptr", true)}
               {plot(si ? "mass flow ṁ = ρuA [kg/s]" : "mass flow ṁ = ρuA", "mdot", true)}
+              {visc && (
+                <PlotCard key="ds" title="displacement thickness δ* [mm] (per wall)" x={sol.x} y={visc.dsMM}
+                          hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
+              )}
+              {visc && (
+                <PlotCard key="H" title={"shape factor H" + (vres.separated ? " · separates" : "")} x={sol.x} y={visc.H}
+                          hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
+              )}
               {res.t.length > 1 && (
                 <PlotCard wide title="convergence · mean |Δρ| / Δt (log scale)" x={res.t} y={res.r} logY
                           hoverX={frame ? frame.t : null} resetKey={resetKey} />

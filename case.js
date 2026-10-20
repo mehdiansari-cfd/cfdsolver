@@ -27,6 +27,9 @@
      "steady": { "tol": 1e-6, "tMax": 0.5 } }      optional: run until steady instead
        (stops when the mean |Δρ|/ρ over one flow-through time L/a0 drops below tol)
 
+   Nozzle cases may add a displacement correction (boundary.js), in SI:
+   "boundaryLayer": { "geometry": "channel", "span": 0.1, "nWalls": 2, "theta0": 0 }
+   ("axisymmetric" takes A = πr²; theta0 = inlet momentum thickness, m).
    { "kind": "facility", "driver": "He", "driven": "N2", "thermo": "thermally-perfect",
      "p4": 376e3, "T4": 300, "p1": 5e3, "T1": 300, "L4": 3, "L1": 6,
      "simulate": true, "numerics": { "N": 600 } }
@@ -42,6 +45,9 @@ if (typeof initState === "undefined" && typeof require === "function") {
   var _caseFac = require("./facility");
   var facilityAnalysis = _caseFac.facilityAnalysis, facilitySimParams = _caseFac.facilitySimParams;
   var gasModel = require("./gas").gasModel;
+}
+if (typeof viscousQuasi1D === "undefined" && typeof require === "function") {
+  var viscousQuasi1D = require("./boundary").viscousQuasi1D;
 }
 
 const CASE_KINDS = ["shocktube", "nozzle", "facility"];
@@ -92,6 +98,13 @@ function normalizeCase(input) {
     } else {
       _need(c.geometry, ["AR", "L"], "geometry");
       c.geometry.type = c.geometry.type || "CD";
+    }
+    if (c.boundaryLayer) {
+      if (resolveGas(c.gas, c.thermo).gamma != null) throw new Error("boundaryLayer needs a real gas in SI units, not { gamma }.");
+      const bl = c.boundaryLayer = Object.assign({ geometry: "channel", nWalls: 2, theta0: 0 }, c.boundaryLayer);
+      if (!["channel", "axisymmetric"].includes(bl.geometry)) throw new Error("boundaryLayer.geometry must be \"channel\" or \"axisymmetric\".");
+      if (bl.geometry === "channel") _need(bl, ["span"], "boundaryLayer (channel: A = span × height)");
+      _need(bl, ["theta0"], "boundaryLayer");
     }
   } else {
     _need(c, ["p4", "T4", "p1", "T1", "L4", "L1"], "facility");
@@ -231,6 +244,22 @@ function runCase(input, onProgress) {
       regime: ex.regime, mdot: f.mdot[n >> 1], mdotExact: ex.mdot[0], exitMach: f.M[n - 1], exitMachExact: ex.M[n - 1],
       exitPressure: f.p[n - 1], xShockExact: ex.xShock
     });
+    if (c.boundaryLayer) {
+      // Displacement-corrected steady solution (boundary.js), next to the inviscid one.
+      const v = viscousQuasi1D(P, c.boundaryLayer);
+      const at = (X, Y, x) => { let k = 1; while (k < X.length - 1 && X[k] < x) k++; return Y[k - 1] + (x - X[k - 1]) / (X[k] - X[k - 1]) * (Y[k] - Y[k - 1]); };
+      out.viscous = {
+        x: v.solution.x, p: v.solution.p, M: v.solution.M, T: v.solution.T, u: v.solution.u, rho: v.solution.rho,
+        Aeff: v.solution.x.map(x => at(v.x, v.Aeff, x)), deltaStar: v.solution.x.map(x => at(v.x, v.deltaStar, x)),
+        theta: v.solution.x.map(x => at(v.bl.x, v.bl.theta, x)), H: v.solution.x.map(x => at(v.bl.x, v.bl.H, x)),
+        Cf: v.solution.x.map(x => at(v.bl.x, v.bl.Cf, x))
+      };
+      Object.assign(out.summary, {
+        viscousRegime: v.solution.regime, xShockViscous: v.xShock, mdotViscous: v.solution.mdot[0],
+        exitMachViscous: v.solution.M[v.solution.M.length - 1], viscousReliable: v.reliable,
+        viscousConverged: v.converged, separation: v.bl.separation
+      });
+    }
   }
   out.summary.steps = s.step; out.summary.t = s.t;
   if (steady) { out.summary.converged = out.converged; out.summary.residual = out.residual; }

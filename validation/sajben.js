@@ -6,6 +6,9 @@
    Geometry: upper / lower wall coordinates (inches), A(x) ∝ h(x) per
    unit depth. Data: wall static pressure p/p0 against x/H* (H* = throat
    height, x from the throat) on the bottom and top walls.
+   With config.boundaryLayer, the exact quasi-1D flow is also coupled to a
+   turbulent integral boundary layer (boundary.js) for each inlet momentum
+   thickness θ0 listed: the displacement-corrected ("viscous") solution.
    Outputs, per case, in results/sajben/: computed and measured CSV, an
    SVG plot, and report.json (RMS Δ(p/p0) per wall, shock positions).
    Skips cleanly (exit 0) when the experimental files are absent.
@@ -15,6 +18,7 @@ const fs = require("fs");
 const path = require("path");
 const Z = require("../nozzle");
 const C = require("../case");
+const BL = require("../boundary");
 
 const HERE = path.join(__dirname, "sajben");
 const OUT = path.join(__dirname, "..", "results", "sajben");
@@ -58,9 +62,10 @@ function shockAt(X, P) {
 const SHOCK_MARGIN = 0.3;      // x/H* excluded either side of the shocks
 const RECOVERY_LENGTH = 1.5;   // further x/H* behind the later shock before "recovered flow"
 const SVG_W = 760, SVG_H = 420, SVG_PAD = { l: 60, r: 20, t: 40, b: 50 };
-function svgPlot(title, comp, exact, walls) {
+const VISCOUS_DASH = ["", "6 3", "2 3"];
+function svgPlot(title, comp, exact, walls, viscous) {
   const xs = comp.map(c => c.xH).concat(...walls.map(w => w.pts.map(p => p.xH)));
-  const ys = comp.map(c => c.p).concat(exact.map(e => e.p), ...walls.map(w => w.pts.map(p => p.p)));
+  const ys = comp.map(c => c.p).concat(exact.map(e => e.p), ...walls.map(w => w.pts.map(p => p.p)), ...viscous.map(v => v.pts.map(p => p.p)));
   const x0 = Math.floor(Math.min(...xs)), x1 = Math.ceil(Math.max(...xs));
   const y0 = Math.floor(Math.min(...ys) * 20) / 20, y1 = Math.ceil(Math.max(...ys) * 20) / 20;
   const pw = SVG_W - SVG_PAD.l - SVG_PAD.r, ph = SVG_H - SVG_PAD.t - SVG_PAD.b;
@@ -75,23 +80,53 @@ function svgPlot(title, comp, exact, walls) {
     `<text x="${SVG_PAD.l + pw / 2}" y="${SVG_H - 12}" fill="#7d8794" text-anchor="middle">x / H*  (from the throat)</text>`,
     `<text transform="translate(16 ${SVG_PAD.t + ph / 2}) rotate(-90)" fill="#7d8794" text-anchor="middle">p / p0</text>`,
     line(exact, `stroke="#98a0ab" stroke-width="1.25" stroke-dasharray="4 3"`),
-    line(comp, `stroke="#d9653f" stroke-width="2"`));
+    line(comp, `stroke="#d9653f" stroke-width="2"`),
+    ...viscous.map((v, k) => line(v.pts, `stroke="#5fb3a3" stroke-width="1.5" stroke-dasharray="${VISCOUS_DASH[k % VISCOUS_DASH.length]}"`)));
   walls.forEach((w, k) => w.pts.forEach(p => out.push(k === 0
     ? `<circle cx="${X(p.xH)}" cy="${Y(p.p)}" r="4" fill="none" stroke="#4a8fe0" stroke-width="1.75"/>`
     : `<rect x="${(+X(p.xH) - 3.5).toFixed(1)}" y="${(+Y(p.p) - 3.5).toFixed(1)}" width="7" height="7" fill="#4a8fe0"/>`)));
-  const lx = SVG_PAD.l + pw - 250, ly = SVG_PAD.t + ph - 72;
-  out.push(`<rect x="${lx - 8}" y="${ly - 14}" width="250" height="78" fill="#101317" stroke="#3a414c"/>`,
+  const LEG_ROW = 18, LEG_W = 300, lx = SVG_PAD.l + pw - LEG_W, ly = SVG_PAD.t + ph - 72 - viscous.length * LEG_ROW;
+  out.push(`<rect x="${lx - 8}" y="${ly - 14}" width="${LEG_W}" height="${78 + viscous.length * LEG_ROW}" fill="#101317" stroke="#3a414c"/>`,
     `<line x1="${lx}" x2="${lx + 22}" y1="${ly}" y2="${ly}" stroke="#d9653f" stroke-width="2"/><text x="${lx + 30}" y="${ly + 4}" fill="#e7e9ec">quasi-1D Euler (numerical)</text>`,
     `<line x1="${lx}" x2="${lx + 22}" y1="${ly + 18}" y2="${ly + 18}" stroke="#98a0ab" stroke-dasharray="4 3"/><text x="${lx + 30}" y="${ly + 22}" fill="#e7e9ec">quasi-1D exact</text>`,
     `<circle cx="${lx + 11}" cy="${ly + 36}" r="4" fill="none" stroke="#4a8fe0" stroke-width="1.75"/><text x="${lx + 30}" y="${ly + 40}" fill="#e7e9ec">measured, ${walls[0].name} wall</text>`,
     `<rect x="${lx + 7.5}" y="${ly + 50.5}" width="7" height="7" fill="#4a8fe0"/><text x="${lx + 30}" y="${ly + 58}" fill="#e7e9ec">measured, ${walls[1] ? walls[1].name : ""} wall</text>`,
+    ...viscous.map((v, k) => { const yy = ly + 72 + k * LEG_ROW;
+      return `<line x1="${lx}" x2="${lx + 22}" y1="${yy}" y2="${yy}" stroke="#5fb3a3" stroke-width="1.5" stroke-dasharray="${VISCOUS_DASH[k % VISCOUS_DASH.length]}"/><text x="${lx + 30}" y="${yy + 4}" fill="#e7e9ec">${v.label}</text>`; }),
     `</svg>`);
   return out.join("\n") + "\n";
 }
 
-// opts: { N, write (default true), quiet } — test.js runs a coarser, silent copy.
+// Error by region: ahead of both shocks (isentropic, the fair test of the
+// model), between the measured and computed shocks (shock-position error),
+// and the recovered flow well behind both.
+function wallMetrics(walls, cx, cp, shockComputed) {
+  const out = {};
+  for (const w of walls) {
+    const xsM = shockAt(w.pts.map(q => q.xH), w.pts.map(q => q.p));
+    const lo = Math.min(xsM, shockComputed) - SHOCK_MARGIN, hi = Math.max(xsM, shockComputed) + SHOCK_MARGIN;
+    const acc = { all: [], upstream: [], downstream: [] };
+    for (const q of w.pts) {
+      const d = interp(cx, cp, q.xH) - q.p;
+      acc.all.push(d);
+      if (q.xH < lo) acc.upstream.push(d);
+      else if (q.xH > hi + RECOVERY_LENGTH) acc.downstream.push(d);
+    }
+    const rms = a => (a.length ? Math.sqrt(a.reduce((t, d) => t + d * d, 0) / a.length) : null);
+    const maxAbs = a => (a.length ? Math.max(...a.map(Math.abs)) : null);
+    out[w.name] = {
+      points: w.pts.length, shock_xH_measured: xsM, shock_xH_error: shockComputed - xsM,
+      rmsDeltaP_all: rms(acc.all),
+      upstream: { points: acc.upstream.length, rmsDeltaP: rms(acc.upstream), maxDeltaP: maxAbs(acc.upstream) },
+      downstream: { points: acc.downstream.length, rmsDeltaP: rms(acc.downstream), maxDeltaP: maxAbs(acc.downstream) }
+    };
+  }
+  return out;
+}
+
+// opts: { N, write (default true), quiet, viscous (default true), theta0 (list, overrides config), blN } — test.js runs a coarser, silent copy.
 function main(opts) {
-  const o = Object.assign({ write: true, quiet: false }, opts || {});
+  const o = Object.assign({ write: true, quiet: false, viscous: true }, opts || {});
   const log = o.quiet ? () => {} : console.log;
   const cfg = JSON.parse(fs.readFileSync(path.join(HERE, "config.json"), "utf8"));
   if (o.N) cfg.numerics.N = o.N;
@@ -149,27 +184,29 @@ function main(opts) {
       shock_xH_computed: shockAt(cx, cp), shock_xH_exactQuasi1D: exact.xShock != null ? xH(exact.xShock + x0) : null,
       walls: {}
     };
-    // Error by region: ahead of both shocks (isentropic, the fair test of the
-    // model), between the measured and computed shocks (shock-position error),
-    // and the recovered flow well behind both.
-    for (const w of walls) {
-      const xsM = shockAt(w.pts.map(q => q.xH), w.pts.map(q => q.p));
-      const lo = Math.min(xsM, r.shock_xH_computed) - SHOCK_MARGIN, hi = Math.max(xsM, r.shock_xH_computed) + SHOCK_MARGIN;
-      const acc = { all: [], upstream: [], downstream: [] };
-      for (const q of w.pts) {
-        const d = interp(cx, cp, q.xH) - q.p;
-        acc.all.push(d);
-        if (q.xH < lo) acc.upstream.push(d);
-        else if (q.xH > hi + RECOVERY_LENGTH) acc.downstream.push(d);
+    r.walls = wallMetrics(walls, cx, cp, r.shock_xH_computed);
+
+    // Displacement-corrected quasi-1D flow, one run per inlet θ0.
+    const viscous = [];
+    const bl = cfg.boundaryLayer;
+    if (bl && o.viscous) {
+      r.viscous = [];
+      for (const theta0 of o.theta0 || bl.theta0) {
+        const v = BL.viscousQuasi1D({ type: "table", areaTable: { x: xs, A: h }, gas, p0: cfg.p0, T0: cfg.T0, pb: cs.exitPressureRatio * cfg.p0 },
+                                    { geometry: bl.geometry, span: 1, nWalls: bl.nWalls, theta0, N: o.blN || bl.N });
+        const pts = v.solution.x.map((x, i) => ({ xH: xH(x + x0), p: v.solution.p[i] / cfg.p0 }));
+        const shock = v.xShock != null ? xH(v.xShock + x0) : null;
+        r.viscous.push({
+          theta0_mm: theta0 * 1e3, regime: v.solution.regime, shock_xH: shock, converged: v.converged,
+          // false when the layer separates or p_b fell in a jump of p_exit(x_s):
+          // the shock position is then not a prediction of this model
+          reliable: v.reliable, separated: v.separated, pExitMismatch: v.pExitMismatch,
+          separation: v.bl.separation.map(e => ({ event: e.event, xH: xH(e.x + x0) })),
+          deltaStarExit_over_h: v.deltaStar[v.deltaStar.length - 1] / h[h.length - 1],
+          walls: shock != null ? wallMetrics(walls, pts.map(q => q.xH), pts.map(q => q.p), shock) : null
+        });
+        viscous.push({ label: "+ boundary layer, theta0 " + (theta0 * 1e3).toFixed(1) + " mm" + (v.reliable ? "" : " (sep.)"), pts });
       }
-      const rms = a => (a.length ? Math.sqrt(a.reduce((t, d) => t + d * d, 0) / a.length) : null);
-      const maxAbs = a => (a.length ? Math.max(...a.map(Math.abs)) : null);
-      r.walls[w.name] = {
-        points: w.pts.length, shock_xH_measured: xsM, shock_xH_error: r.shock_xH_computed - xsM,
-        rmsDeltaP_all: rms(acc.all),
-        upstream: { points: acc.upstream.length, rmsDeltaP: rms(acc.upstream), maxDeltaP: maxAbs(acc.upstream) },
-        downstream: { points: acc.downstream.length, rmsDeltaP: rms(acc.downstream), maxDeltaP: maxAbs(acc.downstream) }
-      };
     }
     report[name] = r;
     if (!o.write) { log(name + ": " + JSON.stringify(r)); continue; }
@@ -179,14 +216,20 @@ function main(opts) {
       geometry: { type: "table", x: xs.map(v => +(v - x0).toFixed(7)), A: h.map(v => +v.toFixed(7)) },
       p0: cfg.p0, T0: cfg.T0, pb: cs.exitPressureRatio * cfg.p0,
       numerics: { N: cfg.numerics.N, cfl: cfg.numerics.cfl, flux: cfg.numerics.flux }, steady: { tol: 1e-6, tMax: 0.5 } };
+    // A is height per unit depth, so span = 1 m makes the "channel" height h itself.
+    if (bl) caseFile.boundaryLayer = { geometry: bl.geometry, span: 1, nWalls: bl.nWalls, theta0: bl.theta0[0] };
     fs.writeFileSync(path.join(OUT, name + ".case.json"), JSON.stringify(caseFile, null, 2) + "\n");
     fs.writeFileSync(path.join(OUT, name + ".measured_duct_x.csv"),
       "# x [m from duct inlet], p/p0 — measured, both walls (load with 'Load p/p0 CSV' in the Nozzle tab)\n" +
       [].concat(...walls.map(w => w.pts.map(q => (xThroat + q.xH * hThroat - x0).toFixed(6) + "," + q.p))).join("\n") + "\n");
-    fs.writeFileSync(path.join(OUT, name + ".computed.csv"), C.tableToCSV(comp.map((c, i) => ({ x_over_H: c.xH, p_over_p0: c.p, M: c.M, p_over_p0_exact_quasi1D: ex[i].p }))));
+    fs.writeFileSync(path.join(OUT, name + ".computed.csv"), C.tableToCSV(comp.map((c, i) => {
+      const row = { x_over_H: c.xH, p_over_p0: c.p, M: c.M, p_over_p0_exact_quasi1D: ex[i].p };
+      viscous.forEach((v, k) => { row["p_over_p0_viscous_theta0_" + r.viscous[k].theta0_mm + "mm"] = interp(v.pts.map(q => q.xH), v.pts.map(q => q.p), c.xH); });
+      return row;
+    })));
     fs.writeFileSync(path.join(OUT, name + ".measured.csv"), C.tableToCSV([].concat(...walls.map(w => w.pts.map(q => ({ wall: w.name, x_over_H: q.xH, p_over_p0: q.p }))))));
     fs.writeFileSync(path.join(OUT, name + ".svg"),
-      svgPlot("Sajben diffuser, " + name + " shock (p_exit/p0 = " + cs.exitPressureRatio + "): wall pressure", comp, ex, walls));
+      svgPlot("Sajben diffuser, " + name + " shock (p_exit/p0 = " + cs.exitPressureRatio + "): wall pressure", comp, ex, walls, viscous));
     log(name + ": " + JSON.stringify(r));
   }
   if (o.write) fs.writeFileSync(path.join(OUT, "report.json"), JSON.stringify(report, null, 2) + "\n");

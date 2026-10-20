@@ -38,13 +38,13 @@ That's the whole setup. Each page loads React and Babel-standalone from a CDN, t
 
 - **Real gases, SI units** — pick air, N₂, O₂, Ar, He, H₂, CO₂ or frozen CH₄–air / H₂–air products; calorically perfect (γ fixed at 298 K) or thermally perfect (γ = γ(T), NASA-7 polynomials). The legacy non-dimensional ideal gas (γ, R = 1) is still there for the textbook problems.
 - **1D shock tube** — the Riemann problem with one gas or two (driver / driven), against an exact real-gas Riemann solution.
-- **Quasi-1D nozzle** — analytic or tabulated (CSV) area profiles, a stagnation reservoir and a back pressure; compared with the exact steady quasi-1D solution in every regime, including the location of a normal shock. Measured p/p₀ data can be overlaid.
+- **Quasi-1D nozzle** — analytic or tabulated (CSV) area profiles, a stagnation reservoir and a back pressure; compared with the exact steady quasi-1D solution in every regime, including the location of a normal shock. An optional turbulent boundary-layer displacement correction couples the exact solution to an integral boundary layer. Measured p/p₀ data can be overlaid.
 - **Shock-tube facility** — design a reflected-shock tube: driver/driven gases, fill pressures and lengths → incident and reflected shock conditions (states 1–5), tailoring, test time, the p₄ for a target Mₛ, and an x–t wave diagram from a two-gas simulation.
 - **Verification and validation** — order-of-accuracy studies and grid convergence index (GCI) error bars, in the browser and from Node; comparison with the Sajben transonic-diffuser experiment (NPARC data).
 - **Case files and CLI** — save / load JSON cases, export CSV, and run any case headless with `node run.js`, including parameter sweeps.
 - **2D Cartesian** — full 2D Euler on a Cartesian grid (non-dimensional), with the radial Sod problem, the Lax–Liu four-quadrant Riemann (config 3), the Sedov point blast and the Kelvin–Helmholtz instability.
 
-All modules share four selectable Riemann fluxes, MUSCL reconstruction and SSP-RK2 time integration. The math lives in `gas.js`, `solver.js`, `nozzle.js`, `facility.js`, `verify.js` and `solver2d.js` as pure modules with no DOM coupling, so you can also `require` them from Node for headless experiments, convergence studies, or test scripts.
+All modules share four selectable Riemann fluxes, MUSCL reconstruction and SSP-RK2 time integration. The math lives in `gas.js`, `solver.js`, `nozzle.js`, `boundary.js`, `facility.js`, `verify.js` and `solver2d.js` as pure modules with no DOM coupling, so you can also `require` them from Node for headless experiments, convergence studies, or test scripts.
 
 ## Who it's for
 
@@ -110,7 +110,8 @@ It uses only Node's built-in modules — no test framework, no dev-dependencies 
 | Facility | shock-tube equation, p₅/p₂ and the Mr–Mₛ relation to 10⁻⁶; a two-gas simulation reproduces the reflection time, p₅ and T₅ to < 1% and the under-tailored pressure rise |
 | Case files / CLI | validation messages; `node run.js` output, `--set`, `--sweep` |
 | Verification | GCI recovers p = 2; smooth-wave L1 order > 1.8; GCI bands contain the exact answer |
-| Validation | Sajben diffuser: pressure ahead of the shock and in the recovered flow match the NPARC data; inviscid shock lies aft of the measured one |
+| Boundary layer | flat-plate θ(x) within 15% of the 1/7-power law and Hᵢ → 1.4; the coupled duct converges and the layer reduces the choked ṁ |
+| Validation | Sajben diffuser: pressure ahead of the shock and in the recovered flow match the NPARC data; the inviscid shock lies aft of the measured one, and the displacement correction brings the weak shock to within 0.4 H* of it; the separated strong case is flagged as unreliable |
 
 ### Verification: order of accuracy and grid convergence index
 
@@ -133,12 +134,14 @@ Verification shows the equations are solved right; validation shows how well the
 |:--:|:--:|
 | ![Sajben diffuser, weak shock: quasi-1D Euler vs measured wall pressure](docs/validation/sajben-weak.svg) | ![Sajben diffuser, strong shock: quasi-1D Euler vs measured wall pressure](docs/validation/sajben-strong.svg) |
 
-| Case | RMS Δ(p/p₀) ahead of the shock | Shock x/H*: computed vs measured | RMS Δ(p/p₀) in the recovered flow |
-|------|------|------|------|
-| weak  | 0.02 | 2.53 vs 1.35–1.49 | 0.01 |
-| strong | 0.02 | 3.89 vs 2.12–2.35 | 0.03 |
+| Case | RMS Δ(p/p₀) ahead of the shock | Shock x/H*, measured | inviscid | + boundary layer | RMS Δ(p/p₀) overall: inviscid → + boundary layer |
+|------|------|------|------|------|------|
+| weak  | 0.02 | 1.35–1.49 | 2.53 | **1.54** | 0.11 → 0.02 |
+| strong | 0.02 | 2.12–2.35 | 3.89 | 3.3–3.8, layer separates: not a prediction | 0.09 → 0.07–0.09 |
 
-The isentropic acceleration through the throat and the recovered exit pressure match the measurements to about 2% of p₀. **The shock is predicted 1.0–1.8 throat heights too far downstream**, with a sharper jump than measured: an inviscid quasi-1D model has no boundary layer, while in the experiment the displacement thickness (and, in the strong case, shock-induced separation) shrinks the effective area and pulls the shock upstream. The numerical shock agrees with the exact quasi-1D solution to 0.02 H*, so this gap is the model's, not the discretisation's — exactly the kind of limit a validation case is meant to expose. Details in [`validation/sajben/README.md`](validation/sajben/README.md); the cases are in [`cases/sajben-weak.json`](cases/sajben-weak.json) / [`cases/sajben-strong.json`](cases/sajben-strong.json), and the measurements can be overlaid in the Nozzle tab with **Load p/p₀ CSV** ([`cases/sajben-weak-measured.csv`](cases/sajben-weak-measured.csv)).
+Inviscid, the isentropic acceleration through the throat and the recovered exit pressure match the measurements to about 2% of p₀, but **the shock lands 1.0–1.8 throat heights too far downstream**. The numerical shock agrees with the exact quasi-1D solution to 0.02 H*, so this gap is the model's, not the discretisation's: an inviscid duct has no boundary layer, while in the experiment the displacement thickness shrinks the effective area and pulls the shock upstream.
+
+**With the displacement correction** ([`boundary.js`](boundary.js), [below](#boundary-layer-displacement-correction)) the weak shock moves from 2.53 to 1.54 H*, 0.06–0.19 H* from the measured jump, and the overall RMS error drops five-fold. The result is the same for inlet momentum thicknesses θ₀ = 0, 0.2 and 0.4 mm (θ₀ is not in the data, so it is swept rather than fitted). In the strong case the shock separates the boundary layer. An integral method in direct mode cannot follow a separated shock / boundary-layer interaction: its answer then depends on θ₀ and on the grid. The code reports `reliable: false` and the plot labels the curves "sep.", rather than presenting a shock position. Details in [`validation/sajben/README.md`](validation/sajben/README.md); the cases are in [`cases/sajben-weak.json`](cases/sajben-weak.json) / [`cases/sajben-strong.json`](cases/sajben-strong.json), and the measurements can be overlaid in the Nozzle tab with **Load p/p₀ CSV** ([`cases/sajben-weak-measured.csv`](cases/sajben-weak-measured.csv)).
 
 See [`test.js`](test.js) for the exact tolerances and setups, and [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a case.
 
@@ -272,6 +275,19 @@ Quasi-1D Euler in a duct with cross-section `A(x)`, for any gas. The flux diverg
 
 **Exact quasi-1D reference** (`quasi1DSolution`). For any gas, the steady solution is built from the isentrope `u = √(2(h₀ − h))`, mass flux `G = ρu` and its sonic maximum `G*`. From the back pressure it picks the regime: unchoked (A* from the exit pressure), choked with a **normal shock** located by matching the exit pressure behind it (real-gas Rankine–Hugoniot), or shock-free supersonic. The numerical shock lands within two cells of it, and ṁ agrees to ~0.06% in choked flow. In weakly unchoked, low-Mach flow the steady ṁ is very sensitive to the exit pressure (a 0.2% pressure difference moves it ~3% at N = 300), so use the GCI study to put an error bar on it.
 
+### Boundary-layer displacement correction
+
+[`boundary.js`](boundary.js) adds the main viscous effect in a duct, the blockage of the wall boundary layers, without touching the inviscid solver. Momentum-integral methods of this kind are standard in duct and diffuser design.
+
+- **Boundary layer.** Turbulent, adiabatic wall, integral method: the compressible von Kármán momentum equation, Head's entrainment equation in Green's compressible form, the adiabatic-wall shape factor (H + 1 = (Hᵢ + 1)(1 + r(γ−1)/2 Mₑ²), r = 0.89), and Ludwieg–Tillmann skin friction at Eckert's reference temperature with Sutherland viscosity. It reproduces the flat-plate 1/7-power law to ~10% and Hᵢ → 1.4. Separation (Hᵢ ≥ 2.4) is detected and reported.
+- **Coupling.** The exact steady quasi-1D solution is computed on the effective area A − δ* (channel: `span · (h − nWalls·δ*)`; axisymmetric: `π(r − δ*)²`), the layer is integrated along it, and the two are iterated with under-relaxation. With a shock in the duct, direct iteration falls into a limit cycle, so the shock position is solved for instead. For a trial x_s the layer is converged with the shock held there; the exit pressure that holds it is read off; then x_s is bisected until that pressure equals p_b.
+- **Use.** Tick **Boundary layer → displacement correction** in the Nozzle tab (SI gases). Teal dashed curves overlay the result, and δ* and H get their own plots. In a nozzle case, add `"boundaryLayer": { "geometry": "channel", "span": 0.1, "nWalls": 2, "theta0": 0 }`; `run.js` then writes `<name>.viscous.csv` (p, M, A_eff, δ*, θ, H, Cf) and adds `xShockViscous`, `mdotViscous` and `viscousReliable` to the summary.
+- **Not modelled.**
+  - Wall friction does not take momentum from the core.
+  - Side-wall layers in "channel" mode.
+  - The structure of the shock / boundary-layer interaction: the layer sees the edge-velocity jump as given.
+  - Separated flow, which is flagged as unreliable rather than computed.
+
 ### Nozzle test problems
 
 | Preset             | Type       | AR  | p_b / p₀ | Regime (exact) | Notes |
@@ -320,6 +336,7 @@ cfdsolver/
 ├── solver.js           1D Euler math: EOS adapters, fluxes, MUSCL, SSP-RK2, exact Riemann (ideal + real gas)
 ├── nozzle.js           Quasi-1D nozzle: area source, tabulated A(x), reservoir + back-pressure BCs,
 │                       exact quasi-1D solution. Builds on solver.js's flux machinery.
+├── boundary.js         Turbulent integral boundary layer + displacement coupling for quasi-1D ducts
 ├── facility.js         Shock-tube facility analysis: incident / reflected shocks, tailoring, test time
 ├── case.js             Case files (JSON), batch runs, CSV — shared by the UI and run.js
 ├── run.js              Headless command-line runner (node run.js case.json …)
@@ -335,7 +352,7 @@ cfdsolver/
 └── README.md           This file
 ```
 
-The math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). `labui.js` is UI-only too: it drives any solver through `init` / `advance` / `stableDt` callbacks and knows nothing about the equations. In the browser the load order is `gas.js → solver.js → nozzle.js → facility.js → case.js → verify.js`; in Node each file `require`s what it needs. `solver2d.js` is self-contained.
+The math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). `labui.js` is UI-only too: it drives any solver through `init` / `advance` / `stableDt` callbacks and knows nothing about the equations. In the browser the load order is `gas.js → solver.js → nozzle.js → boundary.js → facility.js → case.js → verify.js`; in Node each file `require`s what it needs. `solver2d.js` is self-contained.
 
 ---
 
@@ -512,7 +529,7 @@ The choice of methods follows Toro's and Anderson's textbooks closely:
 
 The lab is deliberately small and pedagogical. A non-exhaustive list of things it does *not* do (and could):
 
-- Boundary-layer effects: a displacement-thickness correction to A(x) would move the Sajben shock toward the measured position.
+- Viscous effects beyond displacement: wall friction in the core momentum (Fanno), separated shock / boundary-layer interaction (an inverse or quasi-simultaneous integral method), and side-wall layers.
 - Chemistry: equilibrium or finite-rate composition (dissociation above ~2500 K), not just frozen mixtures.
 - Higher-order reconstruction (PPM, WENO5, MP5) and more limiters.
 - Other source terms (friction / Fanno, heat addition / Rayleigh, gravity, cylindrical / spherical 1D).

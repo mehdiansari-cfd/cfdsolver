@@ -33,7 +33,7 @@ A second-order, explicit, finite-volume solver for the compressible Euler equati
 - **Closure (1D):** ideal gas `p = ρRT` with an equation-of-state adapter (§3): the legacy non-dimensional γ-law (`p = (γ−1)(E − ½ρu²)`, R = 1), or a `gas.js` model in SI — calorically perfect (cₚ fixed) or thermally perfect (cₚ(T) from NASA-7 polynomials, so γ = γ(T)) — or two gases with a transported mass fraction Y (row `ρY`). T is recovered from e by Newton iteration.
 - **Closure (2D):** non-dimensional γ-law only.
 - **Source term `H`:** zero for the shock tube and the 2D solver. The **quasi-1D nozzle** (`nozzle.js`) adds a geometric area source `H = -(1/A)(dA/dx)·[ρu, ρu², u(E+p)]`. That is the only source term in the codebase.
-- **Inviscid only.** No viscous terms, no turbulence model, no reactions. Gas composition is **frozen** (no dissociation): fine to ~2500 K, increasingly wrong above.
+- **Inviscid solvers.** No viscous terms in any time-marching solver, no reactions. The one viscous model is `boundary.js`: a turbulent integral boundary layer whose displacement thickness is coupled to the *exact steady* quasi-1D solution (A_eff = A − δ*), never to `nozzleStepUntil`. Gas composition is **frozen** (no dissociation): fine to ~2500 K, increasingly wrong above.
 
 The solver is meant to be educationally clear first, optimized second. Favor readability over micro-optimization unless a measurable hot path is identified (the 2D inner loop is the one place where reusing preallocated buffers matters — see §3).
 
@@ -80,7 +80,9 @@ cfdsolver/
 ├── gas.js          Gas models in SI: NASA-7 thermo, mixtures, T(e)/T(h), isentropes, stagnation
 ├── solver.js       1D Euler math: EOS adapters, fluxes, MUSCL, SSP-RK2, exact Riemann (ideal + real gas)
 ├── nozzle.js       Quasi-1D nozzle math: area source, PCHIP area tables, reservoir + back-pressure
-│                   BCs, exact quasi-1D solution. Reuses solver.js's flux machinery.
+│                   BCs, exact quasi-1D solution (incl. a forced shock position). Reuses solver.js's flux machinery.
+├── boundary.js     Turbulent integral boundary layer (Head/Green, Ludwieg–Tillmann) + displacement
+│                   coupling with quasi1DSolution; generator form for time-sliced browser runs
 ├── facility.js     Shock-tube facility analysis (incident/reflected shock, tailoring, test time)
 ├── case.js         Driver layer: JSON cases → params → run → CSV. Shared by the UI and run.js
 ├── run.js          Headless CLI: node run.js case.json [--set] [--sweep] [--area]
@@ -92,7 +94,7 @@ cfdsolver/
 └── docs/           Screenshot/GIF capture guide + suggested repo metadata
 ```
 
-**Separation of concerns (do not break this):** the `.js` math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). Browser load order: `labui.js`, then **`gas.js → solver.js → nozzle.js → facility.js → case.js → verify.js`**; each file uses the globals of the ones before it. In Node every file `require`s what it needs through a guarded `if (typeof X === "undefined" && typeof require === "function") { var … }` block at its top (§8.9). `solver2d.js` is self-contained.
+**Separation of concerns (do not break this):** the `.js` math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). Browser load order: `labui.js`, then **`gas.js → solver.js → nozzle.js → boundary.js → facility.js → case.js → verify.js`**; each file uses the globals of the ones before it. In Node every file `require`s what it needs through a guarded `if (typeof X === "undefined" && typeof require === "function") { var … }` block at its top (§8.9). `solver2d.js` is self-contained.
 
 **Equation-of-state adapters (`solver.js`).** Every 1D flux / RHS function takes an `eos` argument that is either a **number γ** (legacy non-dimensional path — keep it bit-identical; `test.js` and the presets depend on it) or an adapter from `idealEos(γ)`, `gasEos(gas)` or `binaryEos(gasA, gasB)` exposing `prim(ρ, ρu, E, ρY) → {u, p, a, T, gamma, R}` and `cons(ρ, u, p, Y)`. Never compute `p` from `E` with a γ formula outside the adapters. `labui.js` is UI-only: the pages hand its `Player` plain callbacks (`init`, `advance` = `stepUntil*`, `stableDt`, `record`, `check`), so it never touches the equations. Shared UI code lives there as plain JS (not JSX) because Babel-standalone can't fetch external JSX over `file://`.
 
@@ -221,7 +223,7 @@ In the calorically perfect limit `facilityAnalysis` must reproduce the shock-tub
 **Design order must be measured on a smooth problem**: the periodic density wave (`"smooth-advection"`) reaches L1 order ≈ 1.9 (2 by design; minmod clips extrema, so L∞ ≈ 1.3). Sod converges at L1 ≈ 0.85 for *any* scheme because of its discontinuities — it is a correctness check, not an order test. Solution verification uses the three-grid GCI of Celik et al. (2008); `test.js` checks that the GCI bands contain the exact answer for the nozzle shock position and the real-gas plateau density.
 
 ### Experimental validation
-`validation/sajben.js` compares the quasi-1D nozzle with the Sajben diffuser wall pressures (unmodified NPARC files in `validation/sajben/data/`). Expected: RMS Δ(p/p₀) ≈ 0.02 ahead of the shock and ≤ 0.035 in the recovered flow; the inviscid shock lies 1.0–1.8 H* **aft** of the measured one (no boundary layer / separation) — that is a model limit, not a bug, and must not be "tuned away". `test.js` checks these. Never edit the data files or commit invented or "representative" experimental numbers.
+`validation/sajben.js` compares the quasi-1D nozzle with the Sajben diffuser wall pressures (unmodified NPARC files in `validation/sajben/data/`). Expected: RMS Δ(p/p₀) ≈ 0.02 ahead of the shock and ≤ 0.035 in the recovered flow; the inviscid shock lies 1.0–1.8 H* **aft** of the measured one (no boundary layer / separation). That is a model limit, not a bug, and must not be "tuned away". With the boundary-layer displacement correction (`config.json` → `boundaryLayer`) the weak shock moves to 1.54 H* (measured 1.35–1.49) for every inlet θ₀ swept. The strong case separates and is reported `reliable: false`. θ₀ is not in the data: sweep it, never fit it. `test.js` checks these. Never edit the data files or commit invented or "representative" experimental numbers.
 
 ---
 
@@ -244,6 +246,7 @@ If you suspect a bug, check these first.
 13. **Mutating arrays that the UI memoises.** `PlotCard` memoises on array identity; append by building a new array (`concat`), never `push` into one already passed to a plot.
 14. **Two-gas interface blip.** Conservative multi-gas schemes produce a few-percent spurious pressure oscillation where the driver/driven interface is smeared (Abgrall 1996). It is a known artefact, documented in the UI; don't "fix" it by tuning, and don't mistake it for a tailoring wave.
 15. **Frozen chemistry.** Above ~2500 K real gases dissociate; the frozen gas models over-predict T. The UI warns; presets stay below it.
+16. **Viscous–inviscid coupling with a shock.** Iterating δ* ↔ the inviscid flow directly locks into a limit cycle, because the shock position is hypersensitive to the downstream area. `viscousQuasi1D` therefore bisects on the shock position (`quasi1DSolution(state, { shockAt })`) and inserts the shock as an exact jump in the boundary-layer edge data, so δ* moves continuously with x_s. Once the layer separates, p_exit(x_s) is not monotone and the result is grid- and θ₀-dependent. Such runs come back `reliable: false` and must be shown as such, never quoted as predictions.
 
 ---
 
@@ -283,7 +286,8 @@ Already shipped: HLL, HLLC, Roe, Rusanov; SSP-RK2; the quasi-1D nozzle with area
 - [x] Order-of-accuracy studies and GCI.
 - [x] Shock-tube facility analysis.
 - [x] Sajben experimental comparison (NPARC data).
-- [ ] Boundary-layer displacement correction for quasi-1D (would move the Sajben shock upstream).
+- [x] Boundary-layer displacement correction for quasi-1D (integral turbulent layer; weak Sajben shock to within 0.2 H*).
+- [ ] Separated shock / boundary-layer interaction (inverse or quasi-simultaneous integral coupling); wall friction in the core.
 - [ ] Equilibrium / finite-rate chemistry (frozen composition only today).
 - [ ] Fanno (friction) and Rayleigh (heat addition) source terms.
 - [ ] Quasi-conservative two-gas formulation (removes the interface blip).

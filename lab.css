@@ -340,6 +340,7 @@ select option { background: var(--field); color: var(--ink); }
 .sw-num { border-top: 2px solid #d9653f; }
 .legend i.sw-data { width: 8px; height: 8px; border: 1.75px solid #4a8fe0; border-radius: 50%; }
 .sw-ref { border-top: 1.5px dashed #98a0ab; }
+.sw-ref2 { border-top: 1.5px dashed #5fb3a3; }
 .plot-canvas { display: block; width: 100%; height: 170px; cursor: crosshair; }
 .plot-card.wide { grid-column: 1 / -1; }
 

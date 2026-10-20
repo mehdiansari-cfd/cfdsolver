@@ -4,6 +4,10 @@
   "p0": 121083.375,
   "T0": 300,
   "numerics": { "N": 400, "cfl": 0.4, "flux": "HLLC", "steadyTol": 1e-6, "maxTransits": 200 },
+  "boundaryLayer": {
+    "_comment": "Turbulent integral boundary layer on the top and bottom walls (boundary.js), started at the duct inlet. The inlet momentum thickness is not in the data: theta0 is a sensitivity sweep, not a fit. Side-wall layers are not modelled.",
+    "geometry": "channel", "nWalls": 2, "theta0": [0, 0.0002, 0.0004], "N": 300
+  },
   "geometry": {
     "upper": "data/upper.pts",
     "lower": "data/lower.pts",

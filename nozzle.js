@@ -394,7 +394,10 @@ function _normalShock(th, T0, s1) {
 
 // Exact steady quasi-1D solution on the cell centres of a nozzle state.
 // mode "auto" picks the regime from the back pressure; "subsonic" /
-// "supersonic" force a choked isentropic branch downstream of the throat.
+// "supersonic" force a choked isentropic branch downstream of the throat;
+// { shockAt: x } forces a normal shock at x (downstream of the throat) and
+// reports the exit pressure that would hold it there (out.pExit) — used by
+// the viscous–inviscid coupling in boundary.js, which solves for x.
 function quasi1DSolution(state, mode) {
   const { N, dx, geom, p0, T0, pb, thermo: th } = state;
   const L = geom.L;
@@ -413,7 +416,12 @@ function quasi1DSolution(state, mode) {
   const pShockAtExit = Ae > At * (1 + 1e-9) ? _normalShock(th, T0, S0.withG(mdotChoked / Ae, true)).p : pSubExit;
 
   let regime, xShock = null, mdot, S2 = null;
-  if (mode === "subsonic" || mode === "supersonic") {
+  if (mode && typeof mode === "object" && mode.shockAt != null) {
+    regime = "shock";
+    mdot = mdotChoked;
+    xShock = Math.min(L, Math.max(xt, mode.shockAt));
+    S2 = _isentrope(th, T0, _normalShock(th, T0, S0.withG(mdot / geom.A(xShock), true)).p0);
+  } else if (mode === "subsonic" || mode === "supersonic") {
     regime = mode === "subsonic" ? "choked-subsonic" : "choked-supersonic";
     mdot = mdotChoked;
   } else if (pb >= pSubExit) {
@@ -440,7 +448,8 @@ function quasi1DSolution(state, mode) {
   }
 
   const out = { x: [], M: [], p: [], rho: [], T: [], a: [], u: [], pt: [], mdot: [],
-                regime, xShock, xThroat: xt, Athroat: At, mdotChoked, pSubExit, pSupExit, pShockAtExit };
+                regime, xShock, xThroat: xt, Athroat: At, mdotChoked, pSubExit, pSupExit, pShockAtExit,
+                pExit: regime === "shock" ? S2.withG(mdot / Ae, false).p : null };
   for (let i = 0; i < N; i++) {
     const x = (i + 0.5) * dx, A = geom.A(x), G = mdot / A;
     const downstream = x > xt;

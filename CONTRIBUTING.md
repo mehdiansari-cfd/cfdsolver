@@ -11,7 +11,7 @@ file in a browser and it runs. Please keep it that way:
 - **No bundler, transpile step, or `npm install` in the runtime path.** React,
   ReactDOM, and Babel-standalone are loaded from a CDN; the math is plain script
   JavaScript (no `import`/`export`, no transpile) in `gas.js`, `solver.js`,
-  `nozzle.js`, `facility.js`, `verify.js`, and `solver2d.js`.
+  `nozzle.js`, `boundary.js`, `facility.js`, `verify.js`, and `solver2d.js`.
 - **No frameworks or libraries beyond the CDN React already in use.** No build
   tooling, no TypeScript compile step, no CSS framework.
 - The test runner (`node test.js`) and CI use **only Node's built-in modules**
@@ -27,6 +27,7 @@ the case — the default answer is "keep it vanilla."
 | `gas.js`       | Gas models in SI (NASA-7 thermo, mixtures, isentropes). No DOM. |
 | `solver.js`    | 1D Euler math: EOS adapters, fluxes, MUSCL, SSP-RK2, exact Riemann (ideal + real gas). No DOM. |
 | `nozzle.js`    | Quasi-1D nozzle math (area source, reservoir/back-pressure BCs). Builds on `solver.js`. |
+| `boundary.js`  | Turbulent integral boundary layer and its displacement coupling with the exact quasi-1D solution. Builds on `nozzle.js`. |
 | `solver2d.js`  | 2D Cartesian Euler. Self-contained. No DOM. |
 | `index.html`   | 1D UI (shock tube + nozzle). React via Babel-standalone. |
 | `index2d.html` | 2D UI. |
@@ -40,7 +41,7 @@ the case — the default answer is "keep it vanilla."
 
 The math layers know nothing about the DOM; the HTML knows nothing about HLLC.
 They communicate through plain JS globals (and CommonJS exports for Node).
-Browser load order is `gas.js → solver.js → nozzle.js → facility.js → case.js → verify.js` (each uses the globals of the ones before it; in Node each file requires what it needs). After adding a script, load both pages in a browser: top-level `const` names must be unique across all of them.
+Browser load order is `gas.js → solver.js → nozzle.js → boundary.js → facility.js → case.js → verify.js` (each uses the globals of the ones before it; in Node each file requires what it needs). After adding a script, load both pages in a browser: top-level `const` names must be unique across all of them.
 
 ## Style
 

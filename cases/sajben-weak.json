@@ -185,5 +185,11 @@
   "steady": {
     "tol": 0.000001,
     "tMax": 0.5
+  },
+  "boundaryLayer": {
+    "geometry": "channel",
+    "span": 1,
+    "nWalls": 2,
+    "theta0": 0
   }
 }

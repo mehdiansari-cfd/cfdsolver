@@ -16,6 +16,7 @@
    Outputs (per run):
      <name>.csv            final fields (SI units in the header)
      <name>.exact.csv      reference solution, when one exists
+     <name>.viscous.csv    displacement-corrected solution (nozzle cases with boundaryLayer)
      <name>.t=<t>.csv      snapshots requested in case.output.times
      <name>.probes.csv     time histories at case.output.probes
      <name>.summary.json   scalar results (mdot, Ms, p5, test time, …)
@@ -87,6 +88,12 @@ function runOne(caseObj, outDir, label, quiet) {
     for (const k of Object.keys(ex)) if (!Array.isArray(ex[k])) delete ex[k];
     fs.writeFileSync(base + ".exact.csv", C.fieldsToCSV(ex, { header: header.concat(["reference solution"]) }));
   }
+  if (res.viscous) fs.writeFileSync(base + ".viscous.csv", C.tableToCSV(res.viscous.x.map((x, i) => {
+    const row = {};
+    for (const [k, unit] of [["x", "m"], ["p", "Pa"], ["M", ""], ["T", "K"], ["u", "m/s"], ["rho", "kg/m3"], ["Aeff", "m2"],
+                             ["deltaStar", "m"], ["theta", "m"], ["H", ""], ["Cf", ""]]) row[unit ? k + " [" + unit + "]" : k] = res.viscous[k][i];
+    return row;
+  })));
   for (const snap of res.snapshots) fs.writeFileSync(base + ".t=" + snap.t.toExponential(4) + ".csv", C.fieldsToCSV(snap.fields, { header }));
   if (res.probes.length) fs.writeFileSync(base + ".probes.csv", C.tableToCSV(res.probes));
   fs.writeFileSync(base + ".summary.json", JSON.stringify({ case: res.case, summary: res.summary }, null, 2) + "\n");

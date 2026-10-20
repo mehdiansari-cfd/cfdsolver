@@ -35,6 +35,7 @@
     series:   "#d9653f",   // numerical solution — one role, one colour, every plot
     data:     "#4a8fe0",   // measured / imported data points (validated vs series on plotBg)
     ref:      "#98a0ab",   // analytical reference — neutral, dashed
+    ref2:     "#5fb3a3",   // second model (e.g. with a boundary-layer correction) — teal, long dash
     cursor:   "#d7a33c",
     font:     "10px ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace"
   };
@@ -392,6 +393,7 @@
       ctx.stroke(); ctx.setLineDash([]);
     };
     if (o.ref) line(o.ref, THEME.ref, 1.25, [4, 3]);
+    if (o.ref2) line(o.ref2, THEME.ref2, 1.5, [8, 3]);
     line(o.y, THEME.series, 2);
     if (pts) {                                   // measured data: hollow 8 px markers with a surface ring
       for (const q of pts) {
@@ -482,17 +484,18 @@
   // yScale converts SI values for display (e.g. 1e-3 for Pa → kPa); points are
   // measured data [{x, y}] in display units, drawn as hollow markers.
   function PlotCard({ title, x, y: yRaw, refY: refRaw, hoverX, onHover, resetKey, logY, refLabel, wide,
-                      yScale, points, pointsLabel }) {
+                      yScale, points, pointsLabel, ref2: ref2Raw, ref2Label }) {
     const sc = yScale || 1;
     const y = useMemo(() => (sc === 1 || !yRaw ? yRaw : Array.from(yRaw, v => v * sc)), [yRaw, sc]);
     const refArr = useMemo(() => (sc === 1 || !refRaw ? refRaw : Array.from(refRaw, v => v * sc)), [refRaw, sc]);
+    const ref2 = useMemo(() => (sc === 1 || !ref2Raw ? ref2Raw : Array.from(ref2Raw, v => v * sc)), [ref2Raw, sc]);
     const ptsY = points ? points.map(q => q.y) : null;
-    const [rlo, rhi] = finiteRange(logY ? [y] : [y, refArr, ptsY]);
+    const [rlo, rhi] = finiteRange(logY ? [y] : [y, refArr, ref2, ptsY]);
     const [lo, hi] = useSmoothRange(rlo, rhi, resetKey);
     const geo = useRef(null);
     const cvRef = useCanvas((ctx, W, H) => {
-      geo.current = drawPlot(ctx, W, H, { x, y, ref: refArr, lo, hi, logY, hoverX, points });
-    }, [x, y, refArr, lo, hi, logY, hoverX, points]);
+      geo.current = drawPlot(ctx, W, H, { x, y, ref: refArr, ref2, lo, hi, logY, hoverX, points });
+    }, [x, y, refArr, ref2, lo, hi, logY, hoverX, points]);
 
     const onMove = e => {
       const g = geo.current; if (!g || !onHover) return;
@@ -506,15 +509,17 @@
                 Math.round(((hoverX - x[0]) / (x[x.length - 1] - x[0])) * (x.length - 1))));
       readout = h("span", { className: "readout" },
         h("b", null, fmt(y[i])),
-        refArr && Number.isFinite(refArr[i]) ? h("span", { className: "muted" }, " · ref " + fmt(refArr[i])) : null);
+        refArr && Number.isFinite(refArr[i]) ? h("span", { className: "muted" }, " · ref " + fmt(refArr[i])) : null,
+        ref2 && Number.isFinite(ref2[i]) ? h("span", { className: "muted" }, " · " + (ref2Label || "ref 2") + " " + fmt(ref2[i])) : null);
     }
     return h("figure", { className: "plot-card" + (wide ? " wide" : "") },
       h("figcaption", null,
         h("span", { className: "plot-title" }, title),
         readout,
-        refArr || points ? h("span", { className: "legend" },
+        refArr || ref2 || points ? h("span", { className: "legend" },
           h("i", { className: "sw-num" }), "numerical",
           refArr ? h("i", { className: "sw-ref" }) : null, refArr ? (refLabel || "exact") : null,
+          ref2 ? h("i", { className: "sw-ref2" }) : null, ref2 ? (ref2Label || "ref 2") : null,
           points ? h("i", { className: "sw-data" }) : null, points ? (pointsLabel || "data") : null) : null),
       h("canvas", { ref: cvRef, className: "plot-canvas", onMouseMove: onMove,
                     onMouseLeave: () => onHover && onHover(null) }));

@@ -51,7 +51,33 @@ remaining differences are the model's, not the discretisation's:
   weak, 3–4% strong, where separated flow recovers more slowly).
 
 This is the expected behaviour of an inviscid quasi-1D model and a useful
-calibration of what it can and cannot predict. A boundary-layer displacement
-correction to A(x), or a 2D viscous solver, would be needed to place the shock.
-`test.js` checks the upstream and recovery agreement and that the shock is
-predicted aft of the measured one.
+calibration of what it can and cannot predict.
+
+## With the boundary-layer displacement correction
+
+`config.json` → `boundaryLayer` couples the exact quasi-1D solution with a
+turbulent integral boundary layer on the top and bottom walls (`boundary.js`,
+started at the duct inlet). The inlet momentum thickness θ0 is not part of the
+data, so it is swept (0, 0.2, 0.4 mm) rather than fitted. The teal curves in the
+plots show the result.
+
+| Case | Shock x/H*: measured | inviscid | + boundary layer (θ0 = 0 / 0.2 / 0.4 mm) | RMS Δ(p/p0), all points |
+|------|------|------|------|------|
+| weak (0.82)   | 1.49 · 1.35 | 2.53 | 1.54 / 1.54 / 1.54 | 0.114 · 0.109 → 0.022 · 0.024 |
+| strong (0.72) | 2.35 · 2.12 | 3.89 | 3.32 / 3.32 / 3.83, **separated** | 0.085 · 0.087 → 0.071–0.087 |
+
+- **Weak shock.** The displacement thickness (about 7% of the exit height per
+  wall) moves the shock 1.0 H* upstream, to within 0.06 H* (bottom) and
+  0.19 H* (top) of the measured jump. It also cuts the overall RMS error
+  five-fold and does not depend on θ0. The layer stays attached.
+- **Strong shock.** The layer separates at the shock. A direct-mode integral
+  method cannot follow separated flow: the exit pressure is no longer a
+  monotone function of the shock position, and the answer moves with θ0 and
+  the grid. `report.json` marks these runs `reliable: false` and the plot
+  labels them "sep.". Placing the strong shock needs an inverse /
+  interaction method or a 2D viscous solver.
+
+`test.js` checks the upstream and recovery agreement and that the inviscid
+shock is aft of the measured one. With the correction it also checks that the
+weak shock lies within 0.4 H* of the data, and that the strong case is flagged
+as separated.

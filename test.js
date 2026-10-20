@@ -447,20 +447,54 @@ check("GCI bands contain the exact answer: shock position (nozzle) and rho_2 (re
   }
 });
 
-// ---- 11. Experimental validation: Sajben transonic diffuser -------------------
+// ---- 11. Boundary layer: integral turbulent method --------------------------
+// Flat plate at low Mach: momentum thickness against the 1/7-power law
+// θ = 0.036 x Re_x^-0.2, and Hᵢ settling near its zero-pressure-gradient 1.4.
+
+const BLM = require("./boundary");
+console.log("Boundary layer (boundary.js):");
+
+check("flat plate: θ(x) within 15% of the 1/7-power law, Hi → 1.4", () => {
+  const n = 400, Lp = 2, ue = 30, Te = 300, rhoe = 1.2, gam = 1.4, Me = ue / Math.sqrt(gam * 287 * Te);
+  const x = Array.from({ length: n + 1 }, (_, i) => (i / n) * Lp);
+  const r = BLM.integrateBoundaryLayer({ x, ue: x.map(() => ue), Me: x.map(() => Me), rhoe: x.map(() => rhoe),
+                                         Te: x.map(() => Te), gamma: x.map(() => gam) });
+  const nu = BLM.sutherlandAir(Te) / rhoe;
+  for (const i of [n / 4, n / 2, n]) {
+    const law = 0.036 * x[i] * Math.pow(ue * x[i] / nu, -0.2);
+    assert(Math.abs(r.theta[i] / law - 1) < 0.15, "θ/θ_1/7 at x = " + x[i] + ": " + (r.theta[i] / law).toFixed(3));
+  }
+  assert(Math.abs(r.Hi[n] - 1.4) < 0.1, "Hi at the end " + r.Hi[n].toFixed(3));
+  assert(r.separation.length === 0, "no separation on a flat plate");
+});
+
+check("coupled CD nozzle, no shock: converges, δ* > 0, choked mass flow drops", () => {
+  const gas = G.gasModel("air"), p0 = 5e5, T0 = 300;
+  const prm = { type: "CD", gas, p0, T0, pb: 0.05 * p0, L: 0.3, AR: 2.5, Athroat: 1e-3 };
+  const v = BLM.viscousQuasi1D(prm, { geometry: "channel", span: 0.05, N: 150 });
+  assert(v.converged, "coupling converged");
+  assert(v.deltaStar.every(d => d >= 0) && v.deltaStar[v.deltaStar.length - 1] > 0, "δ* positive");
+  const inv = Z.quasi1DSolution(Z.initNozzleState(Object.assign({}, prm, { N: 150 })), "auto");
+  assert(v.solution.mdotChoked < inv.mdotChoked, "boundary layer blocks the throat");
+});
+
+// ---- 12. Experimental validation: Sajben transonic diffuser -------------------
 // NPARC wall-pressure data (validation/sajben). Quasi-1D inviscid flow must
 // match the isentropic acceleration upstream of the shock and the recovered
-// pressure downstream. It is expected to put the shock too far aft (no
-// boundary-layer displacement or separation): that error is reported by
-// node validation/sajben.js, and only its sign is checked here.
+// pressure downstream. It puts the shock too far aft (no boundary-layer
+// displacement or separation); the displacement correction must pull the
+// weak shock back to within VISC_SHOCK_TOL of the data. The strong shock
+// separates the layer, which a direct integral method cannot follow: there it
+// must say so (reliable: false) rather than report its shock position as an answer.
 
 console.log("Validation (Sajben diffuser, NPARC data):");
 
-check("Sajben weak/strong shock: upstream & recovery match data; shock aft of measured", () => {
+check("Sajben: upstream & recovery match data; inviscid shock aft; displacement correction moves it to the data", () => {
   const SJ = require("./validation/sajben.js");
-  const r = SJ.main({ N: 200, write: false, quiet: true });
+  const r = SJ.main({ N: 200, write: false, quiet: true, theta0: [0], blN: 150 });
   if (r === null) { console.log("       (data files absent: skipped)"); return; }
   const cellH = 0.13;                                            // two cells at N = 200, in throat heights
+  const VISC_SHOCK_TOL = 0.4;                                     // throat heights
   for (const [name, c] of Object.entries(r)) {
     assert(Math.abs(c.shock_xH_computed - c.shock_xH_exactQuasi1D) < cellH, name + ": numerical shock vs exact quasi-1D");
     for (const [w, v] of Object.entries(c.walls)) {
@@ -469,6 +503,12 @@ check("Sajben weak/strong shock: upstream & recovery match data; shock aft of me
       assert(v.shock_xH_error > 0, name + "/" + w + ": inviscid shock should sit aft of the measured one");
     }
   }
+  const weak = r.weak.viscous[0];
+  assert(weak.reliable, "weak: attached and matched");
+  assert(weak.shock_xH < r.weak.shock_xH_exactQuasi1D, "weak: displacement moves the shock upstream");
+  for (const [w, v] of Object.entries(weak.walls))
+    assert(Math.abs(v.shock_xH_error) < VISC_SHOCK_TOL, "weak/" + w + ": viscous shock error " + v.shock_xH_error.toFixed(3) + " H");
+  assert(!r.strong.viscous[0].reliable && r.strong.viscous[0].separated, "strong: separation flagged, result marked unreliable");
 });
 
 // ---- summary ---------------------------------------------------------------
