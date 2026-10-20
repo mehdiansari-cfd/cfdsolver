@@ -52,11 +52,19 @@
     if (t === "light" || t === "dark") return t;
     return window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   }
-  function setTheme(t) {
-    document.documentElement.dataset.theme = t;
-    try { localStorage.setItem(THEME_KEY, t); } catch (e) { /* private mode: theme just isn't remembered */ }
+  // pref: "light" | "dark" | "system" (follow the operating system; nothing stored)
+  function setTheme(pref) {
+    const root = document.documentElement;
+    if (pref === "light" || pref === "dark") root.dataset.theme = pref; else delete root.dataset.theme;
+    try {
+      if (pref === "light" || pref === "dark") localStorage.setItem(THEME_KEY, pref); else localStorage.removeItem(THEME_KEY);
+    } catch (e) { /* private mode: the choice just isn't remembered */ }
     readTheme();
     window.dispatchEvent(new Event(THEME_EVENT));
+  }
+  function themePreference() {
+    const t = document.documentElement.dataset.theme;
+    return t === "light" || t === "dark" ? t : "system";
   }
   readTheme();
   if (window.matchMedia) {
@@ -606,24 +614,40 @@
     { id: "verify",    label: "Verify",     href: "lab.html#verify" },
     { id: "2d",        label: "2D field",   href: "index2d.html" }
   ];
-  function ThemeToggle() {
-    const [t, setT] = useState(currentTheme);
+  const THEME_OPTIONS = [{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }];
+  const GEAR_PATH = "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" +
+    "M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z";
+
+  // Settings drawer: appearance (system / light / dark). Opened from the gear in the top bar.
+  function SettingsDrawer({ open, onClose }) {
+    const [pref, setPref] = useState(themePreference);
     useEffect(() => {
-      const f = () => setT(currentTheme());
+      const f = () => setPref(themePreference());
       window.addEventListener(THEME_EVENT, f);
       return () => window.removeEventListener(THEME_EVENT, f);
     }, []);
-    const next = t === "dark" ? "light" : "dark";
-    return h("button", { className: "btn icon ghost", onClick: () => setTheme(next),
-                         title: "Switch to " + next + " theme", "aria-label": "Switch to " + next + " theme" },
-      t === "dark"
-        ? h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", "aria-hidden": true },
-            h("circle", { cx: 12, cy: 12, r: 4 }),
-            h("path", { d: "M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" }))
-        : h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true },
-            h("path", { d: "M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" })));
+    useEffect(() => {
+      if (!open) return;
+      const onKey = e => { if (e.key === "Escape") onClose(); };
+      window.addEventListener("keydown", onKey);
+      return () => window.removeEventListener("keydown", onKey);
+    }, [open]);
+    if (!open) return null;
+    return h("div", { className: "drawer-backdrop", onClick: onClose },
+      h("aside", { className: "drawer", onClick: e => e.stopPropagation(), role: "dialog", "aria-label": "Settings" },
+        h("button", { className: "btn icon drawer-close", onClick: onClose, "aria-label": "Close" }, "×"),
+        h("h2", null, "Settings"),
+        h("h3", null, "Appearance"),
+        h("div", { className: "setting" },
+          h("div", null,
+            h("div", { className: "setting-title" }, "Theme"),
+            h("p", { className: "setting-note" },
+              pref === "system" ? "Follows your system setting (now " + currentTheme() + ")." : "Applies to every page of the lab and is remembered on this device.")),
+          h(Segmented, { label: "Theme", value: pref, options: THEME_OPTIONS, onChange: setTheme }))));
   }
+
   function TopBar({ active, scheme, onHelp }) {
+    const [settingsOpen, setSettingsOpen] = useState(false);
     return h("header", { className: "topbar" },
       h("a", { className: "brand", href: "index.html", title: "Back to the start page" },
         h("span", { className: "brand-mark", "aria-hidden": true }), "Euler Lab"),
@@ -632,8 +656,11 @@
                                    "aria-current": t.id === active ? "page" : undefined }, t.label))),
       h("div", { className: "topbar-right" },
         scheme ? h("span", { className: "scheme" }, scheme) : null,
-        h(ThemeToggle),
-        h("button", { className: "btn icon ghost", onClick: onHelp, title: "Help & shortcuts (?)", "aria-label": "Help" }, "?")));
+        h("button", { className: "btn icon ghost", onClick: () => setSettingsOpen(true), title: "Settings", "aria-label": "Settings" },
+          h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true },
+            h("path", { d: GEAR_PATH }))),
+        h("button", { className: "btn icon ghost", onClick: onHelp, title: "Help & shortcuts (?)", "aria-label": "Help" }, "?")),
+      h(SettingsDrawer, { open: settingsOpen, onClose: () => setSettingsOpen(false) }));
   }
 
   function HelpDrawer({ open, onClose, children }) {
@@ -738,9 +765,9 @@
   }
 
   window.LabUI = {
-    THEME, readTheme, setTheme, currentTheme, useThemeVersion, fmt, niceTicks, CMAP, colormap,
+    THEME, readTheme, setTheme, currentTheme, themePreference, useThemeVersion, fmt, niceTicks, CMAP, colormap,
     Player, usePlayer, fitCanvas, useCanvas, useSmoothRange, finiteRange, drawPlot, useShortcuts,
-    NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe,
+    NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, SettingsDrawer, Colorbar, Probe,
     downloadText, pickTextFile, numericTable, runSliced
   };
 })();
