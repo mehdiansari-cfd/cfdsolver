@@ -99,7 +99,17 @@ function _mixtureFromMoles(name, label, X, note) {
   let xs = 0, W = 0;
   for (const k of keys) xs += X[k];
   for (const k of keys) W += (X[k] / xs) * SPECIES[k].W;
-  const x = keys.map(k => X[k] / xs), sp = keys.map(k => SPECIES[k]);
+  let x = keys.map(k => X[k] / xs), sp = keys.map(k => SPECIES[k]);
+  // NASA-7 is linear in its coefficients, so a fixed-composition mixture of
+  // species sharing the 200 / 1000 / 6000 K ranges is itself one NASA-7 fit:
+  // a_mix = sum x_i a_i (single-range species use their one set for both).
+  // Same values, one polynomial per evaluation instead of one per species.
+  if (sp.every(q => q.T[0] === 200 && q.T[2] === 6000)) {
+    const fold = which => [0, 1, 2, 3, 4, 5, 6].map(j =>
+      sp.reduce((acc, q, i) => acc + x[i] * (q.T[1] < q.T[2] ? q[which][j] : q.lo[j]), 0));
+    sp = [{ W, T: [200, 1000, 6000], lo: fold("lo"), hi: fold("hi") }];
+    x = [1];
+  }
   const R = RU / W;
   // Mixture molar quantities are mole-fraction sums; per unit mass divide by W.
   const cpR = T => { let s = 0; for (let i = 0; i < sp.length; i++) s += x[i] * _speciesCpR(sp[i], T); return s; };
@@ -163,6 +173,7 @@ function mixGases(A, B, Y) {
   if (Y <= 0) return B;
   const Z = 1 - Y;
   return {
+    _noTable: true,
     name: A.name + "+" + B.name, kind: A.kind === B.kind ? A.kind : "thermally-perfect",
     R: Y * A.R + Z * B.R,
     cp:  T => Y * A.cp(T) + Z * B.cp(T),
@@ -188,9 +199,29 @@ function _invert(f, fp, target, guess) {
   }
   return T;
 }
+// e(T) lookup table per gas (built lazily) that gives Newton a starting point
+// within ~1e-4 K, so the inverse converges in about two iterations. Mixtures
+// made on the fly by mixGases are flagged _noTable and fall back to `guess`.
+const ETAB_T0 = 50, ETAB_DT = 2, ETAB_N = 3476;      // 50 … 7000 K
+function _eTable(gas) {
+  if (!gas._eTab) {
+    const tab = new Float64Array(ETAB_N);
+    for (let k = 0; k < ETAB_N; k++) tab[k] = gasE(gas, ETAB_T0 + k * ETAB_DT);
+    Object.defineProperty(gas, "_eTab", { value: tab, enumerable: false });
+  }
+  return gas._eTab;
+}
+function _tableGuess(gas, e) {
+  const tab = _eTable(gas);
+  if (!(e > tab[0] && e < tab[ETAB_N - 1])) return null;
+  let lo = 0, hi = ETAB_N - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (tab[mid] <= e) lo = mid; else hi = mid; }
+  return ETAB_T0 + (lo + (e - tab[lo]) / (tab[hi] - tab[lo])) * ETAB_DT;
+}
 // T from specific internal energy: de/dT = cv = cp - R.
 function gasTfromE(gas, e, guess) {
-  return _invert(T => gasE(gas, T), T => gas.cp(T) - gas.R, e, guess);
+  const g = gas._noTable ? null : _tableGuess(gas, e);
+  return _invert(T => gasE(gas, T), T => gas.cp(T) - gas.R, e, g || guess);
 }
 // T from specific enthalpy: dh/dT = cp.
 function gasTfromH(gas, h, guess) {

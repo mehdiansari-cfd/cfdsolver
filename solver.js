@@ -89,7 +89,8 @@ function _tFromE(gas, e) {
 function _gasPrim(gas, rho, mom, ene) {
   const u = mom / rho;
   const T = _tFromE(gas, ene / rho - 0.5 * u * u);
-  return { u, p: rho * gas.R * T, a: gasSound(gas, T), T, gamma: gasGamma(gas, T), R: gas.R };
+  const cp = gas.cp(T), gamma = cp / (cp - gas.R);     // a^2 = gamma R T
+  return { u, p: rho * gas.R * T, a: Math.sqrt(gamma * gas.R * T), T, gamma, R: gas.R };
 }
 
 function gasEos(gas) {

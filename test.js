@@ -296,6 +296,49 @@ check("two-gas He -> air (Ms ~ 4.1) with every flux matches exact, Y stays in [0
   }
 });
 
+// ---- 7. Nozzle: exact quasi-1D in every regime, any gas ----------------------
+
+console.log("Nozzle vs exact quasi-1D theory (all regimes, real gases):");
+
+function nozzleVsExact(name) {
+  const q = Z.NOZZLE_PRESETS[name];
+  let st = Z.initNozzleState(q);
+  while (st.t < q.tEnd) st = Z.nozzleStepUntil(st, q.tEnd);
+  const e = Z.extractNozzle(st), ex = Z.quasi1DSolution(st, "auto");
+  let dM = 0, dp = 0, xsNum = null, jump = 0;
+  for (let i = 0; i < e.x.length; i++) {
+    if (i > 0 && e.p[i] - e.p[i - 1] > jump) { jump = e.p[i] - e.p[i - 1]; xsNum = e.x[i]; }
+    if (ex.xShock != null && Math.abs(e.x[i] - ex.xShock) < 0.04 * st.L) continue;   // skip the shock itself
+    dM = Math.max(dM, Math.abs(e.M[i] - ex.M[i]));
+    dp = Math.max(dp, Math.abs(e.p[i] - ex.p[i]) / st.p0);
+  }
+  return { ex, dM, dp, xsNum, mdotRatio: e.mdot[e.x.length >> 1] / ex.mdot[0], dx: st.dx };
+}
+
+check("Normal Shock preset: shock within 2 cells of the exact quasi-1D location", () => {
+  const r = nozzleVsExact("Normal Shock");
+  assert.strictEqual(r.ex.regime, "shock");
+  assert(Math.abs(r.xsNum - r.ex.xShock) < 2 * r.dx, "shock at " + r.xsNum + " vs exact " + r.ex.xShock.toFixed(4));
+  assert(r.dM < 0.01 && r.dp < 0.01, "away from the shock: |dM| " + r.dM.toFixed(4) + ", |dp|/p0 " + r.dp.toFixed(4));
+});
+
+check("SI air M2 tunnel (thermally perfect): matches exact quasi-1D, mdot to 0.2%", () => {
+  const r = nozzleVsExact("Air tunnel M2 (SI)");
+  assert.strictEqual(r.ex.regime, "supersonic");
+  assert(r.dM < 0.01 && r.dp < 0.005, "|dM| " + r.dM.toFixed(4) + ", |dp|/p0 " + r.dp.toFixed(4));
+  assert(Math.abs(r.mdotRatio - 1) < 2e-3, "mdot ratio " + r.mdotRatio);
+});
+
+check("tabulated area profile (PCHIP) reproduces the analytic CD nozzle", () => {
+  const xs = [], As = [];
+  for (let k = 0; k <= 40; k++) { const x = k / 40; xs.push(x); As.push(Z.nozzleArea(x, 1, 2, "CD")); }
+  const tab = Z.makeAreaTable(xs, As);
+  for (let k = 0; k <= 400; k++) {
+    const x = k / 400;
+    assert(Math.abs(tab.A(x) - Z.nozzleArea(x, 1, 2, "CD")) < 2e-3, "A mismatch at x=" + x);
+  }
+});
+
 // ---- summary ---------------------------------------------------------------
 
 console.log("");
