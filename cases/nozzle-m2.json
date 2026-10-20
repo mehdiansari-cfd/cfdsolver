@@ -1,0 +1,26 @@
+{
+  "kind": "nozzle",
+  "name": "air-tunnel-m2",
+  "gas": {
+    "name": "air",
+    "model": "thermally-perfect"
+  },
+  "geometry": {
+    "type": "CD",
+    "AR": 1.6875,
+    "L": 0.5,
+    "Athroat": 0.001
+  },
+  "p0": 300000.0,
+  "T0": 300,
+  "pb": 24000.0,
+  "numerics": {
+    "N": 300,
+    "cfl": 0.4,
+    "flux": "HLLC"
+  },
+  "steady": {
+    "tol": 1e-05,
+    "tMax": 0.5
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "kind": "shocktube",
+  "name": "air-10to1",
+  "gas": { "name": "air", "model": "thermally-perfect" },
+  "left":  { "p": 1.0e6, "T": 300, "u": 0 },
+  "right": { "p": 1.0e5, "T": 300, "u": 0 },
+  "L": 1, "diaphragm": 0.5, "bc": "transmissive",
+  "numerics": { "N": 400, "cfl": 0.4, "flux": "HLLC" },
+  "tEnd": 6e-4,
+  "output": { "times": [2e-4, 4e-4], "probes": [0.75] }
+}

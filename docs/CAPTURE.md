@@ -13,9 +13,9 @@ Once recorded, drop the files here with these exact names and uncomment the
 
 | File                     | Page          | Preset / setup | What to capture |
 |--------------------------|---------------|----------------|-----------------|
-| `hero.png`               | `index.html`  | **Sod** (loads solved to t_end) | A clean still of the full 1D lab: the tube strip plus the ρ/u/p/e plots with the dashed exact overlay visible. This is the repo's first impression. |
-| `sod-shocktube.gif`      | `index.html`  | **Sod**, press **Play** (Space) | The full animation: rarefaction fan opening left, contact + shock moving right, with the Lagrangian tracer streaks drifting. |
-| `nozzle-cd.gif`          | `index.html` → **Nozzle** tab | **Choked CD** (or **Normal Shock**), **Play** | The CD nozzle marching to steady state; ideally the **Normal Shock** preset so the shock snaps into the divergent section and the total-pressure plot drops across it. |
+| `hero.png`               | `lab.html`    | **Sod** (loads solved to t_end) | A clean still of the full 1D lab: the tube strip plus the ρ/u/p/e plots with the dashed exact overlay visible. This is the repo's first impression. |
+| `sod-shocktube.gif`      | `lab.html`    | **Sod**, press **Play** (Space) | The full animation: rarefaction fan opening left, contact + shock moving right, with the Lagrangian tracer streaks drifting. |
+| `nozzle-cd.gif`          | `lab.html` → **Nozzle** tab | **Choked CD** (or **Normal Shock**), **Play** | The CD nozzle marching to steady state; ideally the **Normal Shock** preset so the shock snaps into the divergent section and the total-pressure plot drops across it. |
 | `kelvin-helmholtz.gif`   | `index2d.html` | **Kelvin-Helmholtz**, **Play**, view = **schlieren** or **density** | The shear layer rolling up into the classic KH billows. This is the most visually striking 2D case. |
 
 Tips:

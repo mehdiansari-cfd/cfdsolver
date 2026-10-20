@@ -3,744 +3,310 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Euler Lab · 1D</title>
-<link rel="stylesheet" href="lab.css">
-
-<!-- React + Babel from CDN (UI rendering only). Versions are pinned so an
-     upstream release can never change or break the page. -->
-<script crossorigin src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
-<script crossorigin src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
-<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<title>Euler Lab</title>
+<meta name="description" content="A browser-based laboratory for compressible flow: shock tubes, nozzles, shock-tube facilities and 2D fields, with real gases, exact solutions and validation against experiment.">
 <script>
-  // Force the classic JSX runtime (React.createElement). The automatic runtime
-  // emits `import ... "react/jsx-runtime"`, which a non-module page with UMD
-  // React can't resolve — leaving the page stuck on "Loading...".
-  Babel.registerPreset('react-classic', {
-    presets: [[Babel.availablePresets['react'], { runtime: 'classic' }]]
-  });
+  // Old links to the solver (index.html#nozzle, …) now live at lab.html.
+  if (/^#(shocktube|nozzle|facility|verify)$/.test(location.hash)) location.replace("lab.html" + location.hash);
+  // Apply a saved light / dark choice before first paint (otherwise the system setting decides).
+  try { var t = localStorage.getItem("eulerlab-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
 </script>
+<link rel="stylesheet" href="lab.css">
+<style>
+  /* Landing-page layout; colours, type and controls come from lab.css. */
+  body { font-size: 15px; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px; }
+  .site-head { position: sticky; top: 0; z-index: 10; background: var(--glass);
+               -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line); }
+  .site-head .wrap { display: flex; align-items: center; gap: 18px; height: 60px; }
+  .site-nav { display: flex; gap: 22px; margin-left: 12px; }
+  .site-nav a { color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
+  .site-nav a:hover { color: var(--ink); }
+  .site-head .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 
-<!-- Shared UI layer (playback engine, plots, controls). Needs React. -->
-<script src="labui.js"></script>
-<!-- CFD solver (math layer, no DOM). solver.js must load BEFORE nozzle.js. -->
+  .hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 56px; align-items: center; padding: 72px 0 56px; }
+  .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--muted);
+             background: var(--surface); border: 1px solid var(--line); padding: 4px 12px; border-radius: 999px; margin-bottom: 22px; }
+  .eyebrow i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  h1 { font-size: clamp(34px, 4.6vw, 52px); line-height: 1.06; letter-spacing: -0.03em; font-weight: 700; margin: 0 0 20px; }
+  h1 em { font-style: normal; color: var(--accent); }
+  .lede { font-size: 17px; line-height: 1.6; color: var(--muted); margin: 0 0 30px; max-width: 34em; }
+  .cta { display: flex; flex-wrap: wrap; gap: 10px; }
+  .cta .btn { height: 44px; padding: 0 22px; font-size: 15px; border-radius: 10px; }
+  .cta .btn-primary { padding: 0 26px; }
+  .hint { margin-top: 18px; font-size: 13px; color: var(--muted); }
+
+  .demo { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow); padding: 18px; }
+  .demo-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 2px 4px 14px; }
+  .demo-head b { font-size: 14px; font-weight: 600; white-space: nowrap; }
+  .demo-head .muted { white-space: nowrap; }
+  .demo-head .chip { margin-left: auto; color: var(--accent-2); }
+  .demo canvas { display: block; width: 100%; }
+  #tube { height: 64px; border-radius: 10px; background: var(--stage); }
+  #plot { height: 200px; margin-top: 10px; }
+  .demo-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 16px; margin: 10px 4px 0; font-size: 12.5px; color: var(--muted); }
+  .demo-foot span i { display: inline-block; width: 16px; height: 0; vertical-align: middle; margin-right: 6px; }
+
+  section.block { padding: 56px 0; border-top: 1px solid var(--line); }
+  .block h2 { font-size: 26px; letter-spacing: -0.02em; font-weight: 650; margin: 0 0 8px; }
+  .block .sub { color: var(--muted); margin: 0 0 30px; max-width: 46em; line-height: 1.6; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 14px; }
+  .card { display: flex; flex-direction: column; gap: 8px; padding: 18px; background: var(--surface); border: 1px solid var(--line);
+          border-radius: 14px; text-decoration: none; color: var(--ink); box-shadow: var(--shadow-sm);
+          transition: border-color 140ms var(--ease), transform 140ms var(--ease), box-shadow 140ms var(--ease); }
+  .card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: var(--shadow); }
+  .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .card .swatch { height: 6px; border-radius: 3px; margin-bottom: 6px;
+                  background: linear-gradient(90deg, rgb(247,242,227), rgb(218,178,98), rgb(173,88,62), rgb(50,34,30)); }
+  .card b { font-size: 15px; font-weight: 600; }
+  .card p { margin: 0; font-size: 13.5px; line-height: 1.55; color: var(--muted); flex: 1; }
+  .card .go { font-size: 13px; font-weight: 500; color: var(--accent); }
+
+  .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 28px 32px; }
+  .fact h3 { font-size: 15px; font-weight: 600; margin: 0 0 6px; }
+  .fact p { margin: 0; font-size: 14px; line-height: 1.6; color: var(--muted); }
+  .fact .num { font-size: 13px; color: var(--ink); background: var(--surface-2); padding: 1px 7px; border-radius: 6px; white-space: nowrap; }
+
+  .run { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 32px; align-items: start; }
+  pre { margin: 0; padding: 18px 20px; background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+        font-family: var(--font-mono); font-size: 13px; line-height: 1.7; overflow-x: auto; color: var(--ink); }
+  pre .c { color: var(--muted); }
+  .run ul { margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.8; font-size: 14px; }
+
+  .site-foot { border-top: 1px solid var(--line); padding: 28px 0 40px; color: var(--muted); font-size: 13px; }
+  .site-foot .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 24px; }
+  .site-foot a { color: var(--muted); }
+
+  @media (max-width: 900px) {
+    .hero { grid-template-columns: 1fr; gap: 36px; padding: 44px 0 36px; }
+    .run { grid-template-columns: 1fr; }
+    .site-nav { display: none; }
+  }
+  @media (max-width: 520px) {
+    .wrap { padding: 0 16px; }
+    .site-head .right .btn-primary { display: none; }
+  }
+</style>
+<!-- Math layer only (no React): the hero animation runs the real solver. -->
+<script src="gas.js"></script>
 <script src="solver.js"></script>
-<script src="nozzle.js"></script>
 </head>
 <body>
-<div id="root"><div class="boot">Loading...</div></div>
 
-<!-- UI layer: React components only. Math comes from solver.js / nozzle.js globals. -->
-<script type="text/babel" data-presets="react-classic">
-window.__eulerBooted = true;
-const { useState, useEffect, useMemo, useRef } = React;
-const {
-  fmt, CMAP, useCanvas, useSmoothRange, finiteRange, usePlayer, useShortcuts,
-  NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe
-} = LabUI;
-
-const FLUX_OPTIONS = ["HLLC", "HLL", "Roe", "Rusanov"];
-const FRAMES_1D = 300;       // recorded frames per run (scrub resolution)
-const CFL_SAFE = 0.5;        // MUSCL + SSP-RK2 practical limit (CLAUDE.md §4)
-
-// Index of the cell containing domain position x (cells of width dx from 0).
-function cellAt(x, dx, N) { return Math.max(0, Math.min(N - 1, Math.floor(x / dx))); }
-
-// Reject a state the solver can't continue from: NaN, or non-positive rho / p.
-function check1D(s) {
-  const { rho, mom, ene, N, gamma } = s;
-  for (let i = 2; i < N + 2; i++) {
-    const r = rho[i];
-    if (!(r > 0)) return "Density became non-positive or NaN";
-    const u = mom[i] / r;
-    if (!((gamma - 1) * (ene[i] - 0.5 * r * u * u) > 0)) return "Pressure became negative or NaN";
-  }
-  return null;
-}
-const recordConserved = s => ({ rho: s.rho.slice(), mom: s.mom.slice(), ene: s.ene.slice() });
-
-// Draw a scalar field as a smooth colour strip: one texel per cell, stretched
-// by drawImage with bilinear filtering so motion reads continuously.
-function drawFieldStrip(ctx, field, lo, hi, x0, y0, w, h, clipPath) {
-  const N = field.length;
-  const off = drawFieldStrip.off || (drawFieldStrip.off = document.createElement("canvas"));
-  if (off.width !== N) { off.width = N; off.height = 1; }
-  const octx = off.getContext("2d");
-  const img = octx.createImageData(N, 1), d = img.data;
-  const inv = 1 / Math.max(hi - lo, 1e-12);
-  for (let i = 0; i < N; i++) {
-    const k = 3 * Math.max(0, Math.min(255, Math.round((field[i] - lo) * inv * 255)));
-    d[4 * i] = CMAP[k]; d[4 * i + 1] = CMAP[k + 1]; d[4 * i + 2] = CMAP[k + 2]; d[4 * i + 3] = 255;
-  }
-  octx.putImageData(img, 0, 0);
-  ctx.save();
-  if (clipPath) { clipPath(ctx); ctx.clip(); }
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-  ctx.drawImage(off, 0, 0, N, 1, x0, y0, w, h);
-  ctx.restore();
-}
-
-function schlieren(rho) {
-  const N = rho.length, out = new Array(N);
-  for (let i = 0; i < N; i++) {
-    const iL = Math.max(0, i - 1), iR = Math.min(N - 1, i + 1);
-    out[i] = Math.sqrt(Math.abs(rho[iR] - rho[iL]));   // sqrt stretch: weak waves stay visible
-  }
-  return out;
-}
-
-// ============================================================
-// Lagrangian tracers: advected with the displayed velocity while the
-// frame moves forward in small steps; frozen across seeks; re-seeded per run.
-// ============================================================
-const TRACERS = 220;
-function useTracers(sol, frame, L, runId, maxJump) {
-  const st = useRef({ run: null, t: null, frame: null, pts: [] });
-  const s = st.current;
-  if (!sol || !frame) return s.pts;
-  if (s.run !== runId) {
-    s.run = runId; s.t = frame.t; s.frame = frame; s.pts = [];
-    for (let i = 0; i < TRACERS; i++) {
-      const x = Math.random() * L;
-      s.pts.push({ x, prevX: x, y: 0.12 + Math.random() * 0.76 });
-    }
-    return s.pts;
-  }
-  if (s.frame === frame) return s.pts;
-  const dt = frame.t - s.t;
-  s.frame = frame; s.t = frame.t;
-  if (dt <= 0 || dt > maxJump) { for (const p of s.pts) p.prevX = p.x; return s.pts; }
-  const N = sol.x.length, dx = L / N;
-  for (const p of s.pts) {
-    p.prevX = p.x;
-    p.x += sol.u[cellAt(p.x, dx, N)] * dt;
-    if (p.x < 0 || p.x > L) { p.x = Math.random() * L; p.prevX = p.x; p.y = 0.12 + Math.random() * 0.76; }
-  }
-  return s.pts;
-}
-
-// ============================================================
-// Shock tube view: field strip + tracers + probe line
-// ============================================================
-function TubeView({ sol, field, lo, hi, L, diaphragm, showDiaphragm, tracers, hoverX, onHover }) {
-  const geo = useRef(null);
-  const ref = useCanvas((ctx, W, H) => {
-    const padX = 14, padT = 12, padB = 20;
-    const tx = padX, ty = padT, tw = W - 2 * padX, th = H - padT - padB;
-    geo.current = { tx, tw };
-    ctx.fillStyle = "#101317"; ctx.fillRect(0, 0, W, H);
-    if (!sol) return;
-    drawFieldStrip(ctx, field, lo, hi, tx, ty, tw, th);
-
-    // tube-wall shading
-    const g = ctx.createLinearGradient(0, ty, 0, ty + th);
-    g.addColorStop(0, "rgba(0,0,0,0.28)"); g.addColorStop(0.5, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.28)");
-    ctx.fillStyle = g; ctx.fillRect(tx, ty, tw, th);
-
-    if (tracers) {
-      ctx.lineCap = "round";
-      for (const p of tracers) {
-        const x1 = tx + (p.prevX / L) * tw, x2 = tx + (p.x / L) * tw, y = ty + p.y * th;
-        if (Math.abs(x2 - x1) < 0.4) {
-          ctx.fillStyle = "rgba(20,18,16,0.55)";
-          ctx.beginPath(); ctx.arc(x2, y, 1, 0, Math.PI * 2); ctx.fill();
-        } else {
-          ctx.strokeStyle = "rgba(20,18,16,0.7)"; ctx.lineWidth = 1.2;
-          ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
-          ctx.fillStyle = "#8b3a2f";
-          ctx.beginPath(); ctx.arc(x2, y, 1.3, 0, Math.PI * 2); ctx.fill();
-        }
-      }
-    }
-    if (showDiaphragm) {
-      const dxp = tx + (diaphragm / L) * tw;
-      ctx.strokeStyle = "#e2724b"; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(dxp, ty - 4); ctx.lineTo(dxp, ty + th + 4); ctx.stroke(); ctx.setLineDash([]);
-    }
-    if (hoverX != null) {
-      const hx = Math.round(tx + (hoverX / L) * tw) + 0.5;
-      ctx.strokeStyle = "#d7a33c"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(hx, ty - 5); ctx.lineTo(hx, ty + th + 5); ctx.stroke();
-    }
-    ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 1;
-    ctx.strokeRect(tx + 0.5, ty + 0.5, tw - 1, th - 1);
-    ctx.font = "10px ui-monospace, Menlo, Consolas, monospace"; ctx.fillStyle = "#7d8794"; ctx.textBaseline = "top";
-    ctx.textAlign = "left";  ctx.fillText("x = 0", tx, ty + th + 6);
-    ctx.textAlign = "right"; ctx.fillText("x = " + L, tx + tw, ty + th + 6);
-  }, [sol, field, lo, hi, L, diaphragm, showDiaphragm, tracers, hoverX]);
-
-  const onMove = e => {
-    const g = geo.current; if (!g) return;
-    const r = e.currentTarget.getBoundingClientRect();
-    const f = (e.clientX - r.left - g.tx) / g.tw;
-    onHover(f < 0 || f > 1 ? null : f * L);
-  };
-  return <canvas ref={ref} className="stage-canvas" style={{ height: 132 }}
-                 onMouseMove={onMove} onMouseLeave={() => onHover(null)} />;
-}
-
-// Keyboard shortcuts shared by both 1D workspaces.
-function usePlayerKeys(player, stale, run, onHelp) {
-  useShortcuts({
-    "Enter": () => run("solve"),
-    " ": () => (player && !stale ? player.toggle() : run("play")),
-    "ArrowLeft": () => player && player.stepFrame(-1),
-    "ArrowRight": () => player && player.stepFrame(1),
-    "Home": () => player && player.seek(0),
-    "End": () => player && player.seek(player.tEnd),
-    "?": onHelp
-  });
-}
-
-// ============================================================
-// Shock tube workspace
-// ============================================================
-function ShockTubeApp({ onHelp }) {
-  const [preset, setPreset]         = useState("Sod");
-  const [leftState, setLeftState]   = useState(PRESETS["Sod"].L);
-  const [rightState, setRightState] = useState(PRESETS["Sod"].R);
-  const [N, setN]                   = useState(400);
-  const [Ldom, setLdom]             = useState(1.0);
-  const [tEnd, setTEnd]             = useState(PRESETS["Sod"].tEnd);
-  const [gamma, setGamma]           = useState(1.4);
-  const [cfl, setCfl]               = useState(0.4);
-  const [diaphragm, setDiaphragm]   = useState(PRESETS["Sod"].diaphragm);
-  const [bcType, setBcType]         = useState("transmissive");
-  const [flux, setFlux]             = useState("HLLC");
-  const [overlay, setOverlay]       = useState(true);
-  const [tubeMode, setTubeMode]     = useState("density");
-  const [showDerived, setShowDerived] = useState(true);
-  const [showTracers, setShowTracers] = useState(true);
-  const [hoverX, setHoverX]         = useState(null);
-  const [err, setErr]               = useState(null);
-
-  const [player, startPlayer] = usePlayer();
-  const solved = useRef({ key: null, params: null, run: 0 });
-
-  const params = useMemo(() => ({
-    N, L: Ldom, tEnd, gamma, cfl, diaphragm, leftState, rightState, bcType, flux
-  }), [N, Ldom, tEnd, gamma, cfl, diaphragm, leftState, rightState, bcType, flux]);
-  const stale = !!player && solved.current.key !== JSON.stringify(params);
-
-  const validate = P => {
-    if (!(P.leftState.rho > 0 && P.rightState.rho > 0)) return "Density must be positive.";
-    if (!(P.leftState.p > 0 && P.rightState.p > 0))     return "Pressure must be positive.";
-    if (!(P.gamma > 1))                                  return "γ must be greater than 1.";
-    if (!(P.cfl > 0 && P.cfl <= 0.9))                    return "CFL must be in (0, 0.9].";
-    if (!(P.N >= 20 && P.N <= 2000))                     return "N must be between 20 and 2000.";
-    if (!(P.tEnd > 0))                                   return "t_end must be positive.";
-    if (!(P.L > 0))                                      return "L must be positive.";
-    if (!(P.diaphragm > 0 && P.diaphragm < P.L))         return "The diaphragm must lie inside the domain.";
-    return null;
-  };
-
-  const run = (mode, P) => {
-    P = P || params;
-    const e = validate(P); setErr(e); if (e) return;
-    solved.current = { key: JSON.stringify(P), params: P, run: solved.current.run + 1 };
-    startPlayer({
-      tEnd: P.tEnd, maxFrames: FRAMES_1D, playSeconds: 6,
-      init: () => initState(P),
-      advance: (s, t) => stepUntil(s, t),
-      stableDt,
-      record: recordConserved,
-      check: check1D
-    }, mode);
-  };
-
-  const loadPreset = name => {
-    const q = PRESETS[name];
-    setPreset(name); setLeftState(q.L); setRightState(q.R); setTEnd(q.tEnd); setDiaphragm(q.diaphragm);
-    run("solve", Object.assign({}, params, { leftState: q.L, rightState: q.R, tEnd: q.tEnd, diaphragm: q.diaphragm }));
-  };
-
-  useEffect(() => { run("solve"); /* eslint-disable-next-line */ }, []);
-  usePlayerKeys(player, stale, run, onHelp);
-
-  // ---- what to show: the frame under the playback cursor ----
-  const SP = solved.current.params;
-  const frame = player ? player.current() : null;
-  const sol = useMemo(() => {
-    if (!frame || !SP) return null;
-    return extract({ rho: frame.snap.rho, mom: frame.snap.mom, ene: frame.snap.ene,
-                     N: SP.N, dx: SP.L / SP.N, gamma: SP.gamma });
-  }, [frame, SP]);
-
-  const exact = useMemo(() => {
-    if (!sol || !overlay || SP.bcType === "reflective") return null;
-    const ex = exactRiemann(SP.leftState, SP.rightState, SP.gamma, SP.diaphragm, frame.t, sol.x);
-    if (!ex) return null;
-    const n = ex.rho.length, g = SP.gamma;
-    const d = { M: new Array(n), T: new Array(n), s: new Array(n), a: new Array(n), e: new Array(n) };
-    for (let i = 0; i < n; i++) {
-      const r = Math.max(ex.rho[i], 1e-12), p = Math.max(ex.p[i], 1e-12);
-      const a = Math.sqrt(g * p / r);
-      d.a[i] = a; d.M[i] = ex.u[i] / a; d.T[i] = p / r;
-      d.s[i] = Math.log(p / Math.pow(r, g)); d.e[i] = p / ((g - 1) * r);
-    }
-    return Object.assign(ex, d);
-  }, [sol, overlay, SP]);
-
-  const field = useMemo(() => !sol ? null
-    : tubeMode === "pressure" ? sol.p
-    : tubeMode === "Mach" ? sol.M
-    : tubeMode === "schlieren" ? schlieren(sol.rho)
-    : sol.rho, [sol, tubeMode]);
-  const [flo, fhi] = finiteRange([field]);
-  const [lo, hi] = useSmoothRange(flo, fhi, solved.current.run + tubeMode);
-  const tracers = useTracers(showTracers ? sol : null, frame, SP ? SP.L : 1, solved.current.run,
-                             SP ? 4 * SP.tEnd / FRAMES_1D : 0);
-
-  let probe = null, where = "";
-  if (sol && hoverX != null) {
-    const i = cellAt(hoverX, SP.L / SP.N, SP.N);
-    where = "x = " + fmt(sol.x[i], 3);
-    probe = [["ρ", sol.rho[i]], ["u", sol.u[i]], ["p", sol.p[i]], ["M", sol.M[i]], ["T", sol.T[i]]];
-  }
-
-  const resetKey = solved.current.run;
-  const plot = (title, key) => (
-    <PlotCard key={key} title={title} x={sol.x} y={sol[key]}
-              refY={exact ? exact[key] : null} refLabel="exact Riemann"
-              hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
-  );
-  const modeLabel = { density: "density ρ", schlieren: "schlieren |∂ρ/∂x|", pressure: "pressure p", Mach: "Mach M" }[tubeMode];
-
-  return (
-    <div className="app">
-      <TopBar active="shocktube" scheme={flux + " · MUSCL–minmod · SSP-RK2"} onHelp={onHelp} />
-      <div className="workspace">
-        <aside className="rail">
-          <p className="rail-intro">
-            Burst a diaphragm between two gas states and watch the rarefaction, contact and shock separate.
-          </p>
-          <Section title="Preset">
-            <div className="presets">
-              {Object.keys(PRESETS).map(name => (
-                <button key={name} className={"preset" + (preset === name ? " on" : "")}
-                        onClick={() => loadPreset(name)}>{name}</button>
-              ))}
-            </div>
-          </Section>
-          <Section title="Left state">
-            <div className="grid-3">
-              <NumField label="ρ" value={leftState.rho} onChange={v => setLeftState({ ...leftState, rho: v })} />
-              <NumField label="u" value={leftState.u}   onChange={v => setLeftState({ ...leftState, u: v })} />
-              <NumField label="p" value={leftState.p}   onChange={v => setLeftState({ ...leftState, p: v })} />
-            </div>
-          </Section>
-          <Section title="Right state">
-            <div className="grid-3">
-              <NumField label="ρ" value={rightState.rho} onChange={v => setRightState({ ...rightState, rho: v })} />
-              <NumField label="u" value={rightState.u}   onChange={v => setRightState({ ...rightState, u: v })} />
-              <NumField label="p" value={rightState.p}   onChange={v => setRightState({ ...rightState, p: v })} />
-            </div>
-          </Section>
-          <Section title="Numerics">
-            <div className="grid-2">
-              <SelectField label="Riemann flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />
-              <SelectField label="Boundaries" value={bcType} onChange={setBcType} options={["transmissive", "reflective"]} />
-            </div>
-            <div className="grid-3">
-              <NumField label="N cells" value={N} onChange={v => setN(Math.round(v))} step={50} />
-              <NumField label="CFL" value={cfl} onChange={setCfl} step={0.05} />
-              <NumField label="t end" value={tEnd} onChange={setTEnd} step={0.01} />
-              <NumField label="γ" value={gamma} onChange={setGamma} step={0.05} />
-              <NumField label="L" value={Ldom} onChange={setLdom} step={0.1} />
-              <NumField label="x₀" value={diaphragm} onChange={setDiaphragm} step={0.05} />
-            </div>
-            {cfl > CFL_SAFE && <div className="note" style={{ color: "var(--accent-2)" }}>
-              CFL above {CFL_SAFE} is past the usual MUSCL + RK2 margin; Sod diverges near 0.58.</div>}
-          </Section>
-          <Section title="Display">
-            <Segmented label="Tube field" value={tubeMode} onChange={setTubeMode}
-                       options={[{ value: "density", label: "ρ" }, { value: "schlieren", label: "schlieren" },
-                                 { value: "pressure", label: "p" }, { value: "Mach", label: "M" }]} />
-            <Toggle checked={overlay} onChange={setOverlay} label="exact Riemann overlay" />
-            <Toggle checked={showDerived} onChange={setShowDerived} label="derived fields (M, T, s, a)" />
-            <Toggle checked={showTracers} onChange={setShowTracers} label="tracer particles" />
-            {bcType === "reflective" && overlay &&
-              <div className="note">The exact solution assumes an infinite tube, so it is hidden with reflective walls.</div>}
-          </Section>
-        </aside>
-
-        <main className="main">
-          <Transport player={player} stale={stale}
-                     onSolve={() => run("solve")} onPlay={() => run("play")}
-                     info={frame ? frame.step + " steps · " + Math.round(player.computeMs) + " ms" : null} />
-          {stale && <div className="note">Parameters changed — press <b>Solve</b> (Enter) to recompute.</div>}
-          {err && <div className="alert">{err}</div>}
-          {player && player.error && <div className="alert">{player.error} Try HLLC / HLL / Rusanov, a lower CFL, or a finer grid.</div>}
-
-          <section className="stage">
-            <div className="stage-head">
-              <span className="stage-title">Inside the tube</span>
-              <span className="muted">{modeLabel}{showTracers ? " · tracers" : ""}</span>
-            </div>
-            <div className="stage-body">
-              <TubeView sol={sol} field={field} lo={lo} hi={hi} L={SP ? SP.L : 1}
-                        diaphragm={SP ? SP.diaphragm : 0.5} showDiaphragm={!!frame && frame.t === 0}
-                        tracers={showTracers ? tracers : null} hoverX={hoverX} onHover={setHoverX} />
-            </div>
-            <div className="stage-foot">
-              <Colorbar lo={lo} hi={hi} label={modeLabel} />
-              <Probe items={probe} where={where} />
-            </div>
-          </section>
-
-          {sol && (
-            <div className="plots">
-              {plot("density ρ", "rho")}
-              {plot("velocity u", "u")}
-              {plot("pressure p", "p")}
-              {plot("internal energy e", "e")}
-              {showDerived && plot("Mach number M", "M")}
-              {showDerived && plot("temperature T = p/ρ", "T")}
-              {showDerived && plot("entropy s = ln(p/ρ^γ)", "s")}
-              {showDerived && plot("sound speed a", "a")}
-            </div>
-          )}
-          <footer className="note">∂U/∂t + ∂F(U)/∂x = 0 · U = [ρ, ρu, E] · E = p/(γ−1) + ½ρu² · finite volume, ideal gas</footer>
-        </main>
-      </div>
+<header class="site-head">
+  <div class="wrap">
+    <a class="brand" href="index.html"><span class="brand-mark" aria-hidden="true"></span>Euler Lab</a>
+    <nav class="site-nav" aria-label="Sections">
+      <a href="#workspaces">Workspaces</a>
+      <a href="#trust">Verification</a>
+      <a href="#run">Run it</a>
+    </nav>
+    <div class="right">
+      <button class="btn icon ghost" id="theme" type="button" aria-label="Switch theme" title="Switch theme"></button>
+      <a class="btn btn-primary" href="lab.html#shocktube">Open the lab</a>
     </div>
-  );
-}
+  </div>
+</header>
 
-// ============================================================
-// Nozzle view: duct silhouette filled with the field
-// ============================================================
-function NozzleView({ sol, field, lo, hi, geom, hoverX, onHover }) {
-  const geo = useRef(null);
-  const ref = useCanvas((ctx, W, H) => {
-    ctx.fillStyle = "#101317"; ctx.fillRect(0, 0, W, H);
-    if (!sol || !geom) return;
-    const { L, AR, type } = geom;
-    const padX = 16, padY = 16, padB = 22;
-    const pw = W - 2 * padX, ph = H - padY - padB, cy = padY + ph / 2;
-    geo.current = { padX, pw, L };
-    const halfAt = x => (nozzleArea(Math.max(0, Math.min(L, x)), L, AR, type) / AR) * (ph / 2);
-    const SAMPLES = 160;
-    const outline = c => {
-      c.beginPath();
-      for (let k = 0; k <= SAMPLES; k++) { const x = (k / SAMPLES) * L; c.lineTo(padX + (x / L) * pw, cy - halfAt(x)); }
-      for (let k = SAMPLES; k >= 0; k--) { const x = (k / SAMPLES) * L; c.lineTo(padX + (x / L) * pw, cy + halfAt(x)); }
-      c.closePath();
-    };
-    drawFieldStrip(ctx, field, lo, hi, padX, padY, pw, ph, outline);
-    ctx.save(); outline(ctx); ctx.clip();
-    const g = ctx.createLinearGradient(0, padY, 0, padY + ph);
-    g.addColorStop(0, "rgba(0,0,0,0.25)"); g.addColorStop(0.5, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.25)");
-    ctx.fillStyle = g; ctx.fillRect(padX, padY, pw, ph);
-    ctx.restore();
-
-    ctx.strokeStyle = "#c8ccd2"; ctx.lineWidth = 2;
-    for (const sign of [-1, 1]) {
-      ctx.beginPath();
-      for (let k = 0; k <= SAMPLES; k++) { const x = (k / SAMPLES) * L; ctx.lineTo(padX + (x / L) * pw, cy + sign * halfAt(x)); }
-      ctx.stroke();
-    }
-    if (hoverX != null) {
-      const hx = Math.round(padX + (hoverX / L) * pw) + 0.5, hh = halfAt(hoverX);
-      ctx.strokeStyle = "#d7a33c"; ctx.lineWidth = 1;
-      ctx.beginPath(); ctx.moveTo(hx, cy - hh - 6); ctx.lineTo(hx, cy + hh + 6); ctx.stroke();
-    }
-    ctx.font = "10px ui-monospace, Menlo, Consolas, monospace"; ctx.fillStyle = "#7d8794"; ctx.textBaseline = "top";
-    const yLab = padY + ph + 6;
-    ctx.textAlign = "left";   ctx.fillText("inlet · reservoir", padX, yLab);
-    ctx.textAlign = "right";  ctx.fillText("exit · p_b", padX + pw, yLab);
-    ctx.textAlign = "center";
-    if (type === "CD") ctx.fillText("throat", padX + pw / 2, yLab);
-  }, [sol, field, lo, hi, geom, hoverX]);
-
-  const onMove = e => {
-    const g = geo.current; if (!g) return;
-    const r = e.currentTarget.getBoundingClientRect();
-    const f = (e.clientX - r.left - g.padX) / g.pw;
-    onHover(f < 0 || f > 1 ? null : f * g.L);
-  };
-  return <canvas ref={ref} className="stage-canvas" style={{ height: 190 }}
-                 onMouseMove={onMove} onMouseLeave={() => onHover(null)} />;
-}
-
-// Steady-state residual for each recorded frame: mean |Δρ| / Δt between frames.
-// Cached per run so it only processes frames it hasn't seen yet.
-function useResiduals(player, runId) {
-  const st = useRef({ run: null, t: [], r: [] });
-  const s = st.current;
-  if (s.run !== runId) { s.run = runId; s.t = []; s.r = []; }
-  if (player) {
-    const F = player.frames;
-    for (let k = s.t.length + 1; k < F.length; k++) {
-      const a = F[k - 1].snap.rho, b = F[k].snap.rho, dt = F[k].t - F[k - 1].t;
-      let sum = 0;
-      for (let i = 2; i < a.length - 2; i++) sum += Math.abs(b[i] - a[i]);
-      s.t.push(F[k].t); s.r.push(sum / (a.length - 4) / Math.max(dt, 1e-300));
-    }
-  }
-  return s;
-}
-
-// ============================================================
-// Nozzle workspace
-// ============================================================
-function NozzleApp({ onHelp }) {
-  const P0 = NOZZLE_PRESETS["Choked CD"];
-  const [preset, setPreset]     = useState("Choked CD");
-  const [nozzType, setNozzType] = useState(P0.type);
-  const [AR, setAR]             = useState(P0.AR);
-  const [p0, setP0]             = useState(P0.p0);
-  const [T0, setT0]             = useState(P0.T0);
-  const [pb, setPb]             = useState(P0.pb);
-  const [N, setN]               = useState(P0.N);
-  const [Ldom, setLdom]         = useState(P0.L);
-  const [gamma, setGamma]       = useState(P0.gamma);
-  const [cfl, setCfl]           = useState(P0.cfl);
-  const [tEnd, setTEnd]         = useState(P0.tEnd);
-  const [flux, setFlux]         = useState("HLLC");
-  const [viewMode, setViewMode] = useState("Mach");
-  const [branch, setBranch]     = useState(P0.branch);
-  const [showIso, setShowIso]   = useState(true);
-  const [hoverX, setHoverX]     = useState(null);
-  const [err, setErr]           = useState(null);
-
-  const [player, startPlayer] = usePlayer();
-  const solved = useRef({ key: null, params: null, meta: null, run: 0 });
-
-  const params = useMemo(() => ({ type: nozzType, AR, p0, T0, pb, N, L: Ldom, gamma, cfl, tEnd, flux }),
-                         [nozzType, AR, p0, T0, pb, N, Ldom, gamma, cfl, tEnd, flux]);
-  const stale = !!player && solved.current.key !== JSON.stringify(params);
-
-  const validate = P => {
-    if (!(P.AR >= 1))                    return "Area ratio must be ≥ 1.";
-    if (!(P.p0 > 0 && P.T0 > 0))         return "Reservoir p₀ and T₀ must be positive.";
-    if (!(P.pb > 0 && P.pb <= P.p0))     return "Back pressure must be in (0, p₀].";
-    if (!(P.gamma > 1))                  return "γ must be greater than 1.";
-    if (!(P.cfl > 0 && P.cfl <= 0.9))    return "CFL must be in (0, 0.9].";
-    if (!(P.N >= 20 && P.N <= 2000))     return "N must be between 20 and 2000.";
-    if (!(P.tEnd > 0 && P.L > 0))        return "t_end and L must be positive.";
-    return null;
-  };
-
-  const run = (mode, P) => {
-    P = P || params;
-    const e = validate(P); setErr(e); if (e) return;
-    const rec = solved.current = { key: JSON.stringify(P), params: P, meta: null, run: solved.current.run + 1 };
-    startPlayer({
-      tEnd: P.tEnd, maxFrames: 300, playSeconds: 8,
-      init: () => { const s = initNozzleState(P); rec.meta = s; return s; },
-      advance: (s, t) => nozzleStepUntil(s, t),
-      stableDt,
-      record: recordConserved,
-      check: check1D
-    }, mode);
-  };
-
-  const loadPreset = name => {
-    const q = NOZZLE_PRESETS[name];
-    setPreset(name); setNozzType(q.type); setAR(q.AR); setP0(q.p0); setT0(q.T0); setPb(q.pb);
-    setN(q.N); setLdom(q.L); setGamma(q.gamma); setCfl(q.cfl); setTEnd(q.tEnd); setBranch(q.branch);
-    run("solve", { type: q.type, AR: q.AR, p0: q.p0, T0: q.T0, pb: q.pb, N: q.N, L: q.L,
-                   gamma: q.gamma, cfl: q.cfl, tEnd: q.tEnd, flux });
-  };
-
-  useEffect(() => { run("solve"); /* eslint-disable-next-line */ }, []);
-  usePlayerKeys(player, stale, run, onHelp);
-
-  const meta = solved.current.meta;
-  const frame = player ? player.current() : null;
-  const sol = useMemo(() => {
-    if (!frame || !meta) return null;
-    const s = extractNozzle(Object.assign({}, meta, { rho: frame.snap.rho, mom: frame.snap.mom, ene: frame.snap.ene }));
-    s.mdot = s.x.map((_, i) => s.rho[i] * s.u[i] * s.A[i]);
-    return s;
-  }, [frame, meta]);
-  const iso = useMemo(() => (meta && showIso ? isentropicSolution(meta, branch) : null), [meta, showIso, branch]);
-  const res = useResiduals(player, solved.current.run);
-
-  const field = !sol ? null : viewMode === "pressure" ? sol.p : viewMode === "temp" ? sol.T
-              : viewMode === "density" ? sol.rho : sol.M;
-  const [flo, fhi] = finiteRange([field]);
-  const [lo, hi] = useSmoothRange(flo, fhi, solved.current.run + viewMode);
-
-  let probe = null, where = "";
-  if (sol && hoverX != null) {
-    const i = cellAt(hoverX, meta.dx, meta.N);
-    where = "x = " + fmt(sol.x[i], 3) + " · A = " + fmt(sol.A[i], 3);
-    probe = [["M", sol.M[i]], ["p", sol.p[i]], ["T", sol.T[i]], ["ρ", sol.rho[i]], ["pₜ", sol.pt[i]]];
-  }
-
-  const pStar = Math.pow(2 / (gamma + 1), gamma / (gamma - 1));
-  const resetKey = solved.current.run;
-  const plot = (title, key, withIso) => (
-    <PlotCard key={key} title={title} x={sol.x} y={sol[key]}
-              refY={withIso && iso ? iso[key] : null} refLabel="isentropic"
-              hoverX={hoverX} onHover={setHoverX} resetKey={resetKey} />
-  );
-  const modeLabel = { Mach: "Mach M", pressure: "pressure p", temp: "temperature T", density: "density ρ" }[viewMode];
-  const last = sol ? sol.x.length - 1 : 0;
-
-  return (
-    <div className="app">
-      <TopBar active="nozzle" scheme={flux + " · MUSCL–minmod · SSP-RK2"} onHelp={onHelp} />
-      <div className="workspace">
-        <aside className="rail">
-          <p className="rail-intro">
-            A duct fed by a reservoir (p₀, T₀) and exhausting to back pressure p_b. Lower p_b to choke the
-            throat, push a shock into the divergent section, then blow it out.
-          </p>
-          <Section title="Preset">
-            <div className="presets">
-              {Object.keys(NOZZLE_PRESETS).map(name => (
-                <button key={name} className={"preset" + (preset === name ? " on" : "")}
-                        onClick={() => loadPreset(name)}>{name}</button>
-              ))}
-            </div>
-          </Section>
-          <Section title="Geometry">
-            <div className="grid-2">
-              <SelectField label="Type" value={nozzType} onChange={setNozzType}
-                           options={[{ value: "CD", label: "conv.–div." }, { value: "convergent", label: "convergent" },
-                                     { value: "divergent", label: "divergent" }]} />
-              <NumField label="A_max / A_throat" value={AR} onChange={setAR} step={0.1} />
-            </div>
-          </Section>
-          <Section title="Boundary conditions" aside={"p_b/p₀ " + (pb / Math.max(p0, 1e-9)).toFixed(3)}>
-            <div className="grid-3">
-              <NumField label="p₀ inlet" value={p0} onChange={setP0} step={0.05} />
-              <NumField label="T₀ inlet" value={T0} onChange={setT0} step={0.05} />
-              <NumField label="p_b exit" value={pb} onChange={setPb} step={0.01} />
-            </div>
-            <div className="note">Sonic throat at p*/p₀ = {pStar.toFixed(4)}.</div>
-          </Section>
-          <Section title="Numerics">
-            <SelectField label="Riemann flux" value={flux} onChange={setFlux} options={FLUX_OPTIONS} />
-            <div className="grid-3">
-              <NumField label="N cells" value={N} onChange={v => setN(Math.round(v))} step={50} />
-              <NumField label="CFL" value={cfl} onChange={setCfl} step={0.05} />
-              <NumField label="t end" value={tEnd} onChange={setTEnd} step={1} />
-              <NumField label="γ" value={gamma} onChange={setGamma} step={0.05} />
-              <NumField label="L" value={Ldom} onChange={setLdom} step={0.1} />
-            </div>
-            {cfl > CFL_SAFE && <div className="note" style={{ color: "var(--accent-2)" }}>
-              CFL above {CFL_SAFE} is past the usual MUSCL + RK2 margin.</div>}
-          </Section>
-          <Section title="Display">
-            <Segmented label="Duct field" value={viewMode} onChange={setViewMode}
-                       options={[{ value: "Mach", label: "M" }, { value: "pressure", label: "p" },
-                                 { value: "temp", label: "T" }, { value: "density", label: "ρ" }]} />
-            <Toggle checked={showIso} onChange={setShowIso} label="isentropic overlay" />
-            <SelectField label="Overlay branch (divergent part)" value={branch} onChange={setBranch}
-                         options={["subsonic", "supersonic"]} />
-            <div className="note">The overlay assumes a sonic throat, so it applies to choked, shock-free flow.</div>
-          </Section>
-        </aside>
-
-        <main className="main">
-          <Transport player={player} stale={stale}
-                     onSolve={() => run("solve")} onPlay={() => run("play")}
-                     info={frame ? frame.step + " steps · " + Math.round(player.computeMs) + " ms" : null} />
-          {stale && <div className="note">Parameters changed — press <b>Solve</b> (Enter) to recompute.</div>}
-          {err && <div className="alert">{err}</div>}
-          {player && player.error && <div className="alert">{player.error} Try HLLC / HLL / Rusanov or a lower CFL.</div>}
-
-          <section className="stage">
-            <div className="stage-head">
-              <span className="stage-title">{nozzType === "CD" ? "Converging–diverging nozzle" : nozzType + " nozzle"}</span>
-              <span className="muted">{modeLabel}</span>
-              {sol && <span className="muted" style={{ marginLeft: "auto" }}>
-                exit M {fmt(sol.M[last], 3)} · ṁ {fmt(sol.mdot[last], 4)}</span>}
-            </div>
-            <div className="stage-body">
-              <NozzleView sol={sol} field={field} lo={lo} hi={hi} geom={meta} hoverX={hoverX} onHover={setHoverX} />
-            </div>
-            <div className="stage-foot">
-              <Colorbar lo={lo} hi={hi} label={modeLabel} />
-              <Probe items={probe} where={where} />
-            </div>
-          </section>
-
-          {sol && (
-            <div className="plots">
-              {plot("Mach number M", "M", true)}
-              {plot("pressure p", "p", true)}
-              {plot("temperature T", "T", true)}
-              {plot("density ρ", "rho", true)}
-              {plot("total pressure pₜ", "pt", true)}
-              {plot("mass flow ṁ = ρuA (flat at steady state)", "mdot", false)}
-              {res.t.length > 1 && (
-                <PlotCard wide title="convergence · mean |Δρ| / Δt (log scale)" x={res.t} y={res.r} logY
-                          hoverX={frame ? frame.t : null} resetKey={resetKey} />
-              )}
-            </div>
-          )}
-          <footer className="note">∂U/∂t + ∂F/∂x = H · H = −(A′/A)[ρu, ρu², u(E+p)] · A_throat = 1 · reservoir inlet, back-pressure exit</footer>
-        </main>
+<main class="wrap">
+  <section class="hero">
+    <div>
+      <span class="eyebrow"><i></i>Runs in the browser · no install</span>
+      <h1>Compressible flow, <em>solved and checked</em> in your browser.</h1>
+      <p class="lede">A finite-volume Euler laboratory for shock tubes, nozzles, shock-tube facilities and 2D fields.
+        Real gases in SI units, an exact solution beside every run, and a comparison with experiment.</p>
+      <div class="cta">
+        <a class="btn btn-primary" href="lab.html#shocktube">Open the lab</a>
+        <a class="btn" href="#workspaces">Browse workspaces</a>
       </div>
+      <p class="hint">HLLC · HLL · Roe · Rusanov fluxes, MUSCL–minmod, SSP-RK2.</p>
     </div>
-  );
-}
 
-// ============================================================
-// Shell: hash-routed between the two 1D labs, shared help drawer
-// ============================================================
-function routeFromHash() { return location.hash === "#nozzle" ? "nozzle" : "shocktube"; }
+    <figure class="demo" aria-label="Live Sod shock-tube simulation">
+      <div class="demo-head"><b>Sod shock tube</b><span class="muted">computed live</span><span class="chip" id="clock">t = 0.000</span></div>
+      <canvas id="tube"></canvas>
+      <canvas id="plot"></canvas>
+      <div class="demo-foot">
+        <span><i style="border-top: 2px solid var(--series)"></i>density, HLLC + MUSCL (200 cells)</span>
+        <span><i style="border-top: 1.5px dashed var(--ref)"></i>exact Riemann solution</span>
+      </div>
+    </figure>
+  </section>
 
-function App() {
-  const [mode, setMode] = useState(routeFromHash());
-  const [help, setHelp] = useState(false);
-  useEffect(() => {
-    const onHash = () => setMode(routeFromHash());
-    const onKey = e => { if (e.key === "Escape") setHelp(false); };
-    window.addEventListener("hashchange", onHash);
-    window.addEventListener("keydown", onKey);
-    return () => { window.removeEventListener("hashchange", onHash); window.removeEventListener("keydown", onKey); };
-  }, []);
-  const toggleHelp = () => setHelp(h => !h);
-  return (
-    <React.Fragment>
-      {mode === "nozzle" ? <NozzleApp key="nozzle" onHelp={toggleHelp} /> : <ShockTubeApp key="tube" onHelp={toggleHelp} />}
-      <HelpDrawer open={help} onClose={() => setHelp(false)}>
-        <h2>Euler Lab</h2>
-        <p>A browser-based compressible-flow laboratory: second-order finite-volume solutions of the Euler
-          equations, computed live on your machine. No server, no install.</p>
-        <p><b>Shock tube</b> bursts a diaphragm between two gas states (a Riemann problem). The solid orange curve
-          is the numerical solution; the dashed grey curve is the exact one.</p>
-        <p><b>Nozzle</b> drives a convergent / divergent / CD duct from a reservoir and shows how the flow chokes and
-          forms shocks. The convergence plot shows how close the run is to steady state.</p>
-        <h3>Workflow</h3>
-        <p>Pick a preset (it solves immediately), or edit parameters and press <b>Solve</b>. The run computes in
-          small slices between animation frames, so the page stays responsive and the view follows the solution
-          as it develops. Afterwards <b>Play</b> replays it at a steady rate, and the timeline scrubs to any
-          moment. Hover any plot or the field view to probe values — the cursor is linked across every panel.</p>
-      </HelpDrawer>
-    </React.Fragment>
-  );
-}
+  <section class="block" id="workspaces">
+    <h2>Workspaces</h2>
+    <p class="sub">Each one pairs a solver with the theory it should reproduce. Pick a preset, press Solve, scrub through time and hover any plot to probe the flow.</p>
+    <div class="cards">
+      <a class="card" href="lab.html#shocktube"><span class="swatch"></span><b>Shock tube</b>
+        <p>Riemann problems with one gas or two, ideal or thermally perfect, against an exact real-gas solution.</p><span class="go">Open →</span></a>
+      <a class="card" href="lab.html#nozzle"><span class="swatch"></span><b>Nozzle</b>
+        <p>Quasi-1D ducts from a reservoir to a back pressure: choking, normal shocks and a boundary-layer correction.</p><span class="go">Open →</span></a>
+      <a class="card" href="lab.html#facility"><span class="swatch"></span><b>Facility</b>
+        <p>Design a reflected-shock tube: states 1–5, tailoring, test time and an x–t wave diagram.</p><span class="go">Open →</span></a>
+      <a class="card" href="lab.html#verify"><span class="swatch"></span><b>Verify</b>
+        <p>Order-of-accuracy studies and grid-convergence-index error bars on the quantities you care about.</p><span class="go">Open →</span></a>
+      <a class="card" href="index2d.html"><span class="swatch"></span><b>2D field</b>
+        <p>Euler on a Cartesian grid: radial Sod, four-quadrant Riemann, Sedov blast, Kelvin–Helmholtz.</p><span class="go">Open →</span></a>
+    </div>
+  </section>
 
-if (!window.__eulerRoot) {
-  window.__eulerRoot = ReactDOM.createRoot(document.getElementById("root"));
-}
-window.__eulerRoot.render(<App />);
-</script>
+  <section class="block" id="trust">
+    <h2>Built to be checked</h2>
+    <p class="sub">Every result comes with something to compare it against, and a zero-dependency test suite holds the numbers in place.</p>
+    <div class="facts">
+      <div class="fact"><h3>Exact references</h3>
+        <p>Exact Riemann solutions for real gases and two gases, the exact steady quasi-1D duct flow including the normal-shock position, and classical shock-tube theory.</p></div>
+      <div class="fact"><h3>Verified order</h3>
+        <p>Second order measured on a smooth wave (L1 order <span class="num">1.89</span>), with Celik et&nbsp;al. GCI bands that contain the exact answer.</p></div>
+      <div class="fact"><h3>Validated against experiment</h3>
+        <p>Sajben transonic diffuser, NPARC data: with the displacement correction the weak shock sits at <span class="num">1.54 H*</span> against a measured 1.35–1.49.</p></div>
+      <div class="fact"><h3>Real gases, SI units</h3>
+        <p>Air, N₂, O₂, Ar, He, H₂, CO₂ and combustion products, calorically or thermally perfect with γ(T) from NASA-7 polynomials.</p></div>
+    </div>
+  </section>
 
-<!-- Resilience net: if @babel/standalone finishes loading AFTER DOMContentLoaded,
-     its automatic transform of the text/babel script never fires and the page
-     stays on "Loading...". Kick it manually. No-op on the normal path. -->
+  <section class="block" id="run">
+    <h2>Run it your way</h2>
+    <p class="sub">No build step and no dependencies: open the page, or drive the same solver from Node.</p>
+    <div class="run">
+<pre><span class="c"># in the browser</span>
+open index.html
+
+<span class="c"># headless, from a saved case file</span>
+node run.js cases/sod.json --out results/
+node run.js cases/nozzle-m2.json --sweep pb=2e4,4e4,6e4
+
+<span class="c"># the verification suite</span>
+node test.js</pre>
+      <ul>
+        <li>Save and load cases as JSON from any workspace.</li>
+        <li>Export fields and reference solutions as CSV.</li>
+        <li>Sweep parameters and collect a summary table.</li>
+        <li>Overlay measured p/p₀ data on a nozzle run.</li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<footer class="site-foot">
+  <div class="wrap">
+    <span>Euler Lab · MIT licence · after Toro, <i>Riemann Solvers</i>; Anderson, <i>Modern Compressible Flow</i>; Teschner, <i>Write Your First CFD Solver</i>.</span>
+    <a href="https://github.com/mehdiansari-cfd/cfdsolver">Source on GitHub</a>
+  </div>
+</footer>
+
 <script>
-// Runs only after the page has loaded and only if the app script never
-// started (window.__eulerBooted), so it can't execute the app twice.
-window.addEventListener('load', function () {
-  (function ensureBabelRuns(tries){
-    if (window.__eulerBooted) return;
-    if (window.Babel && window.React && window.ReactDOM) {
-      try { window.Babel.transformScriptTags(); } catch (e) {}
+(function () {
+  "use strict";
+  // ---------- Theme toggle (same key as the lab pages) ----------
+  const root = document.documentElement, btn = document.getElementById("theme");
+  const current = () => root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  const SUN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>', MOON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z"/></svg>';
+  const label = () => { const t = current(); btn.innerHTML = t === "dark" ? SUN : MOON; btn.title = "Switch to " + (t === "dark" ? "light" : "dark") + " theme"; };
+  btn.addEventListener("click", () => {
+    const next = current() === "dark" ? "light" : "dark";
+    root.dataset.theme = next;
+    try { localStorage.setItem("eulerlab-theme", next); } catch (e) { /* not remembered */ }
+    label(); readColors(); draw();
+  });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { label(); readColors(); draw(); });
+  label();
+
+  // ---------- Live Sod shock tube (solver.js) ----------
+  const SOD = { left: { rho: 1, u: 0, p: 1 }, right: { rho: 0.125, u: 0, p: 0.1 }, gamma: 1.4, x0: 0.5, tEnd: 0.2 };
+  const N = 200, LOOP_SECONDS = 4.5, HOLD_SECONDS = 1.2, RHO_LO = 0.08, RHO_HI = 1.05;
+  const STOPS = [[0, 247, 242, 227], [0.38, 218, 178, 98], [0.72, 173, 88, 62], [1, 50, 34, 30]];   // lab colormap
+  const color = f => {
+    f = Math.max(0, Math.min(1, f));
+    let k = 1; while (k < STOPS.length - 1 && STOPS[k][0] < f) k++;
+    const a = STOPS[k - 1], b = STOPS[k], w = (f - a[0]) / (b[0] - a[0]);
+    return [0, 1, 2].map(c => Math.round(a[c + 1] + w * (b[c + 1] - a[c + 1])));
+  };
+  const C = {};
+  function readColors() {
+    const cs = getComputedStyle(root);
+    for (const k of ["series", "ref", "grid", "axis", "tick", "stage", "plot"]) C[k] = cs.getPropertyValue("--" + k).trim();
+  }
+  readColors();
+
+  const tube = document.getElementById("tube"), plot = document.getElementById("plot"), clock = document.getElementById("clock");
+  const off = document.createElement("canvas"); off.width = N; off.height = 1;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let state = null, sol = null, exact = null;
+
+  function restart() {
+    state = initState({ N, L: 1, gamma: SOD.gamma, diaphragm: SOD.x0, leftState: SOD.left, rightState: SOD.right,
+                        bcType: "transmissive", flux: "HLLC", cfl: 0.4 });
+    sample();
+  }
+  function sample() {
+    sol = extract(state);
+    exact = state.t > 0 ? exactRiemann(SOD.left, SOD.right, SOD.gamma, SOD.x0, state.t, sol.x) : null;
+  }
+  function fit(cv) {
+    const dpr = window.devicePixelRatio || 1, r = cv.getBoundingClientRect();
+    const W = Math.max(1, Math.round(r.width)), H = Math.max(1, Math.round(r.height));
+    if (cv.width !== W * dpr || cv.height !== H * dpr) { cv.width = W * dpr; cv.height = H * dpr; }
+    const ctx = cv.getContext("2d"); ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, W, H };
+  }
+  function draw() {
+    if (!sol) return;
+    // field strip: one texel per cell, smoothed by drawImage
+    const t = fit(tube), octx = off.getContext("2d"), img = octx.createImageData(N, 1);
+    for (let i = 0; i < N; i++) {
+      const c = color((sol.rho[i] - RHO_LO) / (RHO_HI - RHO_LO));
+      img.data.set([c[0], c[1], c[2], 255], 4 * i);
     }
-    if (!window.__eulerBooted && tries < 60) {
-      setTimeout(function(){ ensureBabelRuns(tries + 1); }, 120);
+    octx.putImageData(img, 0, 0);
+    t.ctx.clearRect(0, 0, t.W, t.H);
+    t.ctx.imageSmoothingEnabled = true; t.ctx.drawImage(off, 0, 0, N, 1, 0, 0, t.W, t.H);
+    const g = t.ctx.createLinearGradient(0, 0, 0, t.H);
+    g.addColorStop(0, "rgba(0,0,0,0.22)"); g.addColorStop(0.5, "rgba(0,0,0,0)"); g.addColorStop(1, "rgba(0,0,0,0.22)");
+    t.ctx.fillStyle = g; t.ctx.fillRect(0, 0, t.W, t.H);
+
+    // density plot
+    const p = fit(plot), ctx = p.ctx, pad = { l: 34, r: 6, t: 8, b: 20 };
+    const pw = p.W - pad.l - pad.r, ph = p.H - pad.t - pad.b;
+    const X = x => pad.l + x * pw, Y = v => pad.t + (1 - (v - 0) / 1.1) * ph;
+    ctx.clearRect(0, 0, p.W, p.H);
+    ctx.font = "10px ui-monospace, 'SF Mono', Menlo, Consolas, monospace"; ctx.fillStyle = C.tick;
+    ctx.textAlign = "right"; ctx.textBaseline = "middle"; ctx.lineWidth = 1;
+    for (const v of [0, 0.25, 0.5, 0.75, 1]) {
+      ctx.strokeStyle = C.grid; ctx.beginPath(); ctx.moveTo(pad.l, Math.round(Y(v)) + 0.5); ctx.lineTo(pad.l + pw, Math.round(Y(v)) + 0.5); ctx.stroke();
+      ctx.fillText(String(v), pad.l - 6, Y(v));
     }
-  })(0);
-});
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (const v of [0, 0.25, 0.5, 0.75, 1]) ctx.fillText(String(v), X(v), pad.t + ph + 6);
+    ctx.strokeStyle = C.axis; ctx.beginPath(); ctx.moveTo(pad.l, pad.t + ph + 0.5); ctx.lineTo(pad.l + pw, pad.t + ph + 0.5); ctx.stroke();
+    const line = (arr, col, w, dash) => {
+      ctx.strokeStyle = col; ctx.lineWidth = w; ctx.setLineDash(dash); ctx.lineJoin = "round"; ctx.beginPath();
+      for (let i = 0; i < N; i++) { const px = X(sol.x[i]), py = Y(arr[i]); i ? ctx.lineTo(px, py) : ctx.moveTo(px, py); }
+      ctx.stroke(); ctx.setLineDash([]);
+    };
+    if (exact) line(exact.rho, C.ref, 1.25, [4, 3]);
+    line(sol.rho, C.series, 2, []);
+    clock.textContent = "t = " + state.t.toFixed(3);
+  }
+
+  restart();
+  if (reduced) { state = stepUntil(state, SOD.tEnd); sample(); draw(); return; }
+  let start = null;
+  function frame(now) {
+    if (start === null) start = now;
+    const s = (now - start) / 1000;
+    if (s > LOOP_SECONDS + HOLD_SECONDS) { start = now; restart(); }
+    else {
+      const target = SOD.tEnd * Math.min(1, s / LOOP_SECONDS);
+      if (target > state.t) { state = stepUntil(state, target); sample(); }
+    }
+    draw();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+  window.addEventListener("resize", draw);
+})();
 </script>
 </body>
 </html>

@@ -23,7 +23,9 @@
 
 const assert = require("assert");
 const S  = require("./solver");
-const Z  = require("./nozzle");   // pulls in what it needs from ./solver itself
+const G  = require("./gas");
+const Z  = require("./nozzle");
+const FA = require("./facility");   // pulls in what it needs from ./solver itself
 const S2 = require("./solver2d");
 
 let passed = 0;
@@ -205,6 +207,308 @@ check("Full Supersonic CD matches the isentropic solution", () => {
     assert(Math.abs(sol.p[i] - iso.p[i]) / iso.p[i] < 0.03, "pressure off by " +
            (100 * Math.abs(sol.p[i] - iso.p[i]) / iso.p[i]).toFixed(1) + "% at i=" + i);
   }
+});
+
+// ---- 5. Gas library ---------------------------------------------------------
+// Reference values: JANAF / NIST cp at 298.15 K [J/(mol K)], textbook air gamma.
+
+console.log("Gas library (NASA-7 thermo, SI):");
+
+check("cp(298.15 K) matches JANAF for N2, O2, Ar, H2, CO2 to 0.1%", () => {
+  const ref = { N2: 29.124, O2: 29.376, Ar: 20.786, H2: 28.836, CO2: 37.135 };
+  for (const k of Object.keys(ref)) {
+    const g = G.GASES[k], cpMol = g.cp(298.15) * g.W;
+    assert(Math.abs(cpMol / ref[k] - 1) < 1e-3, k + " cp = " + cpMol.toFixed(3) + " vs " + ref[k]);
+  }
+});
+
+check("air: R = 287.05, gamma = 1.400 at 298 K and 1.336 at 1000 K", () => {
+  const air = G.GASES.air;
+  assert(Math.abs(air.R - 287.05) < 0.05, "R = " + air.R);
+  assert(Math.abs(G.gasGamma(air, 298.15) - 1.400) < 1e-3, "gamma(298) = " + G.gasGamma(air, 298.15));
+  assert(Math.abs(G.gasGamma(air, 1000) - 1.336) < 2e-3, "gamma(1000) = " + G.gasGamma(air, 1000));
+});
+
+check("thermo inverses round-trip: T(e(T)), isentrope, stagnation", () => {
+  const air = G.GASES.air;
+  for (const T of [120, 300, 1500, 5000, 8000]) {
+    assert(Math.abs(G.gasTfromE(air, G.gasE(air, T)) / T - 1) < 1e-9, "T(e) at " + T);
+  }
+  const st = G.gasStagnation(air, 250, 5e4, 400), back = G.gasStaticFromStagnation(air, st.T0, st.p0, 400);
+  assert(Math.abs(back.T - 250) < 1e-6 && Math.abs(back.p / 5e4 - 1) < 1e-9, "stagnation round trip");
+});
+
+// ---- 6. Real-gas exact Riemann and numerics -----------------------------------
+
+console.log("Real gases (exact Riemann, thermally perfect, two-gas):");
+
+// Calorically perfect gas with R = 1, cp = 3.5 (gamma = 1.4): the general solver
+// must reproduce the closed-form ideal-gas one.
+const CPG_TEST = { name: "test", R: 1, cp: () => 3.5, h: T => 3.5 * (T - 298.15), phi: T => 3.5 * Math.log(T / 298.15) };
+
+check("general exact Riemann = ideal-gas exact Riemann on all five presets", () => {
+  const x = []; for (let i = 0; i < 400; i++) x.push((i + 0.5) / 400);
+  for (const name of Object.keys(S.PRESETS)) {
+    const pr = S.PRESETS[name];
+    const a = S.exactRiemann(pr.L, pr.R, 1.4, 0.5, pr.tEnd, x);
+    const b = S.exactRiemannGas(CPG_TEST, pr.L, CPG_TEST, pr.R, 0.5, pr.tEnd, x);
+    for (let i = 0; i < x.length; i++) {
+      const d = Math.max(Math.abs(a.rho[i] / b.rho[i] - 1), Math.abs(a.p[i] / b.p[i] - 1));
+      assert(d < 5e-5, name + ": rel. difference " + d.toExponential(2) + " at i=" + i);
+    }
+  }
+});
+
+check("calorically perfect air reproduces the normal-shock T2 formula", () => {
+  const air = G.gasModel("air", "calorically-perfect"), He = G.gasModel("He");
+  const sol = S.riemannGasSolve(He, { p: 20e5, T: 300, u: 0 }, air, { p: 1e4, T: 300, u: 0 });
+  const g = G.gasGamma(air, 300), M = sol.right.mach;
+  const T2 = 300 * (2 * g * M * M - (g - 1)) * ((g - 1) * M * M + 2) / ((g + 1) * (g + 1) * M * M);
+  assert(Math.abs(sol.right.T / T2 - 1) < 1e-6, "T2 " + sol.right.T + " vs " + T2);
+});
+
+function runRealGas(P, tEnd) {
+  let s = S.initState(P);
+  const sum = a => { let t = 0; for (let i = 2; i < P.N + 2; i++) t += a[i]; return t; };
+  const m0 = sum(s.rho), e0 = sum(s.ene);
+  while (s.t < tEnd) s = S.stepUntil(s, tEnd);
+  const sol = S.extract(s);
+  const ex = S.exactRiemannGas(P.gasLeft || P.gas, P.leftState, P.gasRight || P.gas, P.rightState, P.diaphragm, tEnd, sol.x);
+  let l1 = 0, rmax = 0;
+  for (let i = 0; i < P.N; i++) { l1 += Math.abs(sol.rho[i] - ex.rho[i]); rmax = Math.max(rmax, ex.rho[i]); }
+  return { err: l1 / P.N / rmax, dm: Math.abs(sum(s.rho) / m0 - 1), de: Math.abs(sum(s.ene) / e0 - 1), sol };
+}
+
+check("thermally perfect air shock tube (10 : 1 bar) matches exact, conserves mass & energy", () => {
+  const r = runRealGas({ N: 400, L: 1, cfl: 0.4, diaphragm: 0.5, bcType: "transmissive", flux: "HLLC",
+                         gas: G.GASES.air, leftState: { p: 10e5, T: 300, u: 0 }, rightState: { p: 1e5, T: 300, u: 0 } }, 6e-4);
+  assert(r.err < 5e-3, "L1 rho error " + r.err.toExponential(2));
+  assert(r.dm < 1e-10 && r.de < 1e-10, "drift mass " + r.dm.toExponential(1) + " energy " + r.de.toExponential(1));
+});
+
+check("two-gas He -> air (Ms ~ 4.1) with every flux matches exact, Y stays in [0, 1]", () => {
+  for (const flux of Object.keys(S.FLUXES)) {
+    const r = runRealGas({ N: 400, L: 1, cfl: 0.4, diaphragm: 0.5, bcType: "transmissive", flux,
+                           gasLeft: G.GASES.He, gasRight: G.GASES.air,
+                           leftState: { p: 20e5, T: 300, u: 0 }, rightState: { p: 1e4, T: 300, u: 0 } }, 2e-4);
+    assert(r.err < 6e-3, flux + ": L1 rho error " + r.err.toExponential(2));
+    assert(r.dm < 1e-10 && r.de < 1e-10, flux + ": conservation drift");
+    for (const y of r.sol.Y) assert(y >= 0 && y <= 1, flux + ": Y out of range " + y);
+  }
+});
+
+// ---- 7. Nozzle: exact quasi-1D in every regime, any gas ----------------------
+
+console.log("Nozzle vs exact quasi-1D theory (all regimes, real gases):");
+
+function nozzleVsExact(name) {
+  const q = Z.NOZZLE_PRESETS[name];
+  let st = Z.initNozzleState(q);
+  while (st.t < q.tEnd) st = Z.nozzleStepUntil(st, q.tEnd);
+  const e = Z.extractNozzle(st), ex = Z.quasi1DSolution(st, "auto");
+  let dM = 0, dp = 0, xsNum = null, jump = 0;
+  for (let i = 0; i < e.x.length; i++) {
+    if (i > 0 && e.p[i] - e.p[i - 1] > jump) { jump = e.p[i] - e.p[i - 1]; xsNum = e.x[i]; }
+    if (ex.xShock != null && Math.abs(e.x[i] - ex.xShock) < 0.04 * st.L) continue;   // skip the shock itself
+    dM = Math.max(dM, Math.abs(e.M[i] - ex.M[i]));
+    dp = Math.max(dp, Math.abs(e.p[i] - ex.p[i]) / st.p0);
+  }
+  return { ex, dM, dp, xsNum, mdotRatio: e.mdot[e.x.length >> 1] / ex.mdot[0], dx: st.dx };
+}
+
+check("Normal Shock preset: shock within 2 cells of the exact quasi-1D location", () => {
+  const r = nozzleVsExact("Normal Shock");
+  assert.strictEqual(r.ex.regime, "shock");
+  assert(Math.abs(r.xsNum - r.ex.xShock) < 2 * r.dx, "shock at " + r.xsNum + " vs exact " + r.ex.xShock.toFixed(4));
+  assert(r.dM < 0.01 && r.dp < 0.01, "away from the shock: |dM| " + r.dM.toFixed(4) + ", |dp|/p0 " + r.dp.toFixed(4));
+});
+
+check("SI air M2 tunnel (thermally perfect): matches exact quasi-1D, mdot to 0.2%", () => {
+  const r = nozzleVsExact("Air tunnel M2 (SI)");
+  assert.strictEqual(r.ex.regime, "supersonic");
+  assert(r.dM < 0.01 && r.dp < 0.005, "|dM| " + r.dM.toFixed(4) + ", |dp|/p0 " + r.dp.toFixed(4));
+  assert(Math.abs(r.mdotRatio - 1) < 2e-3, "mdot ratio " + r.mdotRatio);
+});
+
+check("tabulated area profile (PCHIP) reproduces the analytic CD nozzle", () => {
+  const xs = [], As = [];
+  for (let k = 0; k <= 40; k++) { const x = k / 40; xs.push(x); As.push(Z.nozzleArea(x, 1, 2, "CD")); }
+  const tab = Z.makeAreaTable(xs, As);
+  for (let k = 0; k <= 400; k++) {
+    const x = k / 400;
+    assert(Math.abs(tab.A(x) - Z.nozzleArea(x, 1, 2, "CD")) < 2e-3, "A mismatch at x=" + x);
+  }
+});
+
+// ---- 8. Shock-tube facility ------------------------------------------------
+// Calorically perfect gases must reproduce the classical closed forms
+// (Anderson, Modern Compressible Flow Ch. 7; Gaydon & Hurle 1963); the
+// thermally perfect analysis is cross-checked against the two-gas solver.
+
+console.log("Shock-tube facility (classical theory and two-gas simulation):");
+
+check("calorically perfect He -> air: shock-tube equation, p5/p2 and Mr relations hold", () => {
+  const He = G.gasModel("He", "calorically-perfect"), air = G.gasModel("air", "calorically-perfect");
+  const r = FA.facilityAnalysis({ driver: He, driven: air, p4: 20e5, T4: 300, p1: 5e3, T1: 300, L4: 2, L1: 5 });
+  const g1 = G.gasGamma(air, 300), g4 = G.gasGamma(He, 300), a1 = G.gasSound(air, 300), a4 = G.gasSound(He, 300);
+  const P = r.p2p1, Ms = r.Ms, Mr = r.reflected.Mr;
+  const p4p1 = P * Math.pow(1 - (g4 - 1) * (a1 / a4) * (P - 1) / Math.sqrt(2 * g1 * (2 * g1 + (g1 + 1) * (P - 1))), -2 * g4 / (g4 - 1));
+  assert(Math.abs(p4p1 / r.p4p1 - 1) < 1e-6, "p4/p1 " + p4p1 + " vs " + r.p4p1);
+  const p5p2 = (((3 * g1 - 1) / (g1 - 1)) * P - 1) / (P + (g1 + 1) / (g1 - 1));
+  assert(Math.abs(r.states[5].p / r.states[2].p / p5p2 - 1) < 1e-6, "p5/p2");
+  const rhs = Ms / (Ms * Ms - 1) * Math.sqrt(1 + 2 * (g1 - 1) / ((g1 + 1) * (g1 + 1)) * (Ms * Ms - 1) * (g1 + 1 / (Ms * Ms)));
+  assert(Math.abs(Mr / (Mr * Mr - 1) / rhs - 1) < 1e-6, "Mr relation");
+});
+
+check("facilityDesignP4 inverts the analysis", () => {
+  const base = { driver: "He", driven: "air", T4: 300, p1: 5e3, T1: 300, L4: 2, L1: 5 };
+  const p4 = FA.facilityDesignP4(base, 3.5);
+  assert(Math.abs(FA.facilityAnalysis(Object.assign({}, base, { p4 })).Ms - 3.5) < 1e-6);
+});
+
+check("two-gas simulation reproduces t_reflection, p5, T5 and the under-tailored wave", () => {
+  const cfg = { driver: "He", driven: "N2", T4: 300, p1: 5e3, T1: 300, L4: 3, L1: 6 };
+  cfg.p4 = FA.facilityDesignP4(cfg, 4.2);
+  const a = FA.facilityAnalysis(cfg), P = FA.facilitySimParams(cfg, 600);
+  const tW = a.times.shockAtWall, tA = a.interaction.arriveT;
+  assert.strictEqual(a.interaction.tailoring, "under-tailored");
+  let s = S.initState(P);
+  const wall = () => { const k = s.N + 1; return s.eos.prim(s.rho[k], s.mom[k], s.ene[k], s.rY[k]); };
+  const hist = [];
+  const tStop = tA + 0.3 * (a.expansion.arriveT - tA);
+  while (s.t < tStop) { s = S.stepUntil(s, Math.min(tStop, s.t + 2e-5)); const q = wall(); hist.push({ t: s.t, p: q.p, T: q.T }); }
+  const p5 = a.states[5].p, T5 = a.states[5].T;
+  const tRef = hist.find(h => h.p > 0.5 * (a.states[2].p + p5)).t;
+  assert(Math.abs(tRef / tW - 1) < 0.01, "reflection at " + tRef + " vs " + tW);
+  const mid = hist.filter(h => h.t > tW + 0.3 * (tA - tW) && h.t < tW + 0.7 * (tA - tW));
+  const pm = mid.reduce((acc, h) => acc + h.p, 0) / mid.length, Tm = mid.reduce((acc, h) => acc + h.T, 0) / mid.length;
+  assert(Math.abs(pm / p5 - 1) < 0.01, "p5 plateau " + pm + " vs " + p5);
+  assert(Math.abs(Tm / T5 - 1) < 0.01, "T5 plateau " + Tm + " vs " + T5);
+  // the reflected shock from the contact raises the end-wall pressure afterwards
+  assert(hist[hist.length - 1].p > 1.2 * p5, "no pressure rise after the interaction wave");
+});
+
+// ---- 9. Case files and the command-line runner --------------------------------
+
+console.log("Case files, CSV and the CLI (node run.js):");
+
+const CASE = require("./case");
+const fs = require("fs"), os = require("os"), path = require("path");
+const { execFileSync } = require("child_process");
+
+check("case validation reports bad input clearly", () => {
+  assert.throws(() => CASE.normalizeCase({ kind: "rocket" }), /kind/);
+  assert.throws(() => CASE.normalizeCase({ kind: "shocktube", gas: "air", L: 1, diaphragm: 0.5, tEnd: 1e-3,
+                                            left: { p: 1e5, u: 0 }, right: { p: 1e5, T: 300, u: 0 } }), /left: 'T'/);
+  assert.throws(() => CASE.resolveGas("unobtainium"), /Unknown gas/);
+});
+
+check("run.js: sod.json → CSV + summary; --set and --sweep work", () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "cfd-run-"));
+  const summary = JSON.parse(execFileSync(process.execPath, ["run.js", "cases/sod.json", "--out", out, "--quiet", "--set", "numerics.N=200"]));
+  assert(summary.L1rhoRelative < 1e-2, "L1 " + summary.L1rhoRelative);
+  const csv = fs.readFileSync(path.join(out, "sod.csv"), "utf8").trim().split("\n").filter(l => !l.startsWith("#"));
+  assert.strictEqual(csv.length, 201, "200 rows + header");
+  assert(/^x,rho,u,p,T,M,a,e,s$/.test(csv[0]), "header " + csv[0]);
+  const sweep = execFileSync(process.execPath, ["run.js", "cases/sod.json", "--out", out, "--quiet",
+                                                "--set", "numerics.N=100", "--sweep", "numerics.flux=\"HLLC\",\"Rusanov\""]).toString();
+  const rows = sweep.trim().split("\n");
+  assert.strictEqual(rows.length, 3, sweep);
+  assert(fs.existsSync(path.join(out, "sod.sweep.csv")));
+});
+
+// ---- 10. Verification tooling: order of accuracy and GCI ---------------------
+
+console.log("Verification (order of accuracy, grid convergence index):");
+
+const V = require("./verify");
+
+check("GCI recovers p = 2 and the exact limit from f = 1 + 0.3 h^2 + 0.05 h^3 (r = 2 and 1.5)", () => {
+  const f = h => 1 + 0.3 * h * h + 0.05 * h * h * h;
+  for (const r of [2, 1.5]) {
+    const g = V.gci3(f(0.01), f(0.01 * r), f(0.01 * r * r), 0.01, 0.01 * r, 0.01 * r * r);
+    assert(Math.abs(g.p - 2) < 0.01, "p = " + g.p);
+    assert(Math.abs(g.fExt - 1) < 1e-6, "fExt = " + g.fExt);
+    assert.strictEqual(g.convergence, "monotone");
+  }
+});
+
+check("smooth periodic wave: MUSCL + SSP-RK2 reaches 2nd order in L1 (pairwise > 1.8)", () => {
+  const o = V.orderStudy("smooth-advection", [50, 100, 200, 400]);
+  const last = o.order.L1.pairwise[o.order.L1.pairwise.length - 1];
+  assert(last > 1.8, "finest pairwise L1 order " + last.toFixed(3));
+});
+
+check("GCI bands contain the exact answer: shock position (nozzle) and rho_2 (real-gas tube)", () => {
+  for (const name of ["nozzle-shock-position", "shocktube-plateau"]) {
+    const r = V.gciStudy(name, [100, 200, 400]);
+    assert(r.referenceInsideBand, name + ": exact " + r.reference + " outside " + r.band.join(" … "));
+    assert(r.gci.convergence === "monotone", name + ": " + r.gci.convergence);
+  }
+});
+
+// ---- 11. Boundary layer: integral turbulent method --------------------------
+// Flat plate at low Mach: momentum thickness against the 1/7-power law
+// θ = 0.036 x Re_x^-0.2, and Hᵢ settling near its zero-pressure-gradient 1.4.
+
+const BLM = require("./boundary");
+console.log("Boundary layer (boundary.js):");
+
+check("flat plate: θ(x) within 15% of the 1/7-power law, Hi → 1.4", () => {
+  const n = 400, Lp = 2, ue = 30, Te = 300, rhoe = 1.2, gam = 1.4, Me = ue / Math.sqrt(gam * 287 * Te);
+  const x = Array.from({ length: n + 1 }, (_, i) => (i / n) * Lp);
+  const r = BLM.integrateBoundaryLayer({ x, ue: x.map(() => ue), Me: x.map(() => Me), rhoe: x.map(() => rhoe),
+                                         Te: x.map(() => Te), gamma: x.map(() => gam) });
+  const nu = BLM.sutherlandAir(Te) / rhoe;
+  for (const i of [n / 4, n / 2, n]) {
+    const law = 0.036 * x[i] * Math.pow(ue * x[i] / nu, -0.2);
+    assert(Math.abs(r.theta[i] / law - 1) < 0.15, "θ/θ_1/7 at x = " + x[i] + ": " + (r.theta[i] / law).toFixed(3));
+  }
+  assert(Math.abs(r.Hi[n] - 1.4) < 0.1, "Hi at the end " + r.Hi[n].toFixed(3));
+  assert(r.separation.length === 0, "no separation on a flat plate");
+});
+
+check("coupled CD nozzle, no shock: converges, δ* > 0, choked mass flow drops", () => {
+  const gas = G.gasModel("air"), p0 = 5e5, T0 = 300;
+  const prm = { type: "CD", gas, p0, T0, pb: 0.05 * p0, L: 0.3, AR: 2.5, Athroat: 1e-3 };
+  const v = BLM.viscousQuasi1D(prm, { geometry: "channel", span: 0.05, N: 150 });
+  assert(v.converged, "coupling converged");
+  assert(v.deltaStar.every(d => d >= 0) && v.deltaStar[v.deltaStar.length - 1] > 0, "δ* positive");
+  const inv = Z.quasi1DSolution(Z.initNozzleState(Object.assign({}, prm, { N: 150 })), "auto");
+  assert(v.solution.mdotChoked < inv.mdotChoked, "boundary layer blocks the throat");
+});
+
+// ---- 12. Experimental validation: Sajben transonic diffuser -------------------
+// NPARC wall-pressure data (validation/sajben). Quasi-1D inviscid flow must
+// match the isentropic acceleration upstream of the shock and the recovered
+// pressure downstream. It puts the shock too far aft (no boundary-layer
+// displacement or separation); the displacement correction must pull the
+// weak shock back to within VISC_SHOCK_TOL of the data. The strong shock
+// separates the layer, which a direct integral method cannot follow: there it
+// must say so (reliable: false) rather than report its shock position as an answer.
+
+console.log("Validation (Sajben diffuser, NPARC data):");
+
+check("Sajben: upstream & recovery match data; inviscid shock aft; displacement correction moves it to the data", () => {
+  const SJ = require("./validation/sajben.js");
+  const r = SJ.main({ N: 200, write: false, quiet: true, theta0: [0], blN: 150 });
+  if (r === null) { console.log("       (data files absent: skipped)"); return; }
+  const cellH = 0.13;                                            // two cells at N = 200, in throat heights
+  const VISC_SHOCK_TOL = 0.4;                                     // throat heights
+  for (const [name, c] of Object.entries(r)) {
+    assert(Math.abs(c.shock_xH_computed - c.shock_xH_exactQuasi1D) < cellH, name + ": numerical shock vs exact quasi-1D");
+    for (const [w, v] of Object.entries(c.walls)) {
+      assert(v.upstream.rmsDeltaP < 0.03, name + "/" + w + ": upstream RMS Δp/p0 " + v.upstream.rmsDeltaP.toFixed(4));
+      assert(v.downstream.rmsDeltaP < 0.05, name + "/" + w + ": recovered-flow RMS Δp/p0 " + v.downstream.rmsDeltaP.toFixed(4));
+      assert(v.shock_xH_error > 0, name + "/" + w + ": inviscid shock should sit aft of the measured one");
+    }
+  }
+  const weak = r.weak.viscous[0];
+  assert(weak.reliable, "weak: attached and matched");
+  assert(weak.shock_xH < r.weak.shock_xH_exactQuasi1D, "weak: displacement moves the shock upstream");
+  for (const [w, v] of Object.entries(weak.walls))
+    assert(Math.abs(v.shock_xH_error) < VISC_SHOCK_TOL, "weak/" + w + ": viscous shock error " + v.shock_xH_error.toFixed(3) + " H");
+  assert(!r.strong.viscous[0].reliable && r.strong.viscous[0].separated, "strong: separation flagged, result marked unreliable");
 });
 
 // ---- summary ---------------------------------------------------------------

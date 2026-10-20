@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Euler Lab · 2D</title>
+<script>
+  // Apply a saved light / dark choice before first paint (otherwise the system setting decides).
+  try { var t = localStorage.getItem("eulerlab-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 <link rel="stylesheet" href="lab.css">
 
 <!-- React + Babel from CDN (UI rendering only). Versions are pinned so an
@@ -33,9 +37,23 @@
 window.__eulerBooted = true;
 const { useState, useEffect, useMemo, useRef } = React;
 const {
-  fmt, CMAP, useCanvas, useSmoothRange, finiteRange, usePlayer, useShortcuts,
-  NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe
+  THEME, fmt, CMAP, useCanvas, useSmoothRange, finiteRange, usePlayer, useShortcuts,
+  NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe,
+  downloadText
 } = LabUI;
+
+// Interior fields of a 2D snapshot as CSV, one row per cell (non-dimensional).
+function fields2DToCSV(sol, t, preset) {
+  const lines = ["# case: " + preset + " (2D, non-dimensional)", "# t = " + t, "x,y,rho,u,v,p,M"];
+  const f = v => Number(v.toPrecision(9));
+  for (let j = 0; j < sol.Ny; j++) {
+    for (let i = 0; i < sol.Nx; i++) {
+      const k = j * sol.Nx + i;
+      lines.push([f(sol.xs[i]), f(sol.ys[j]), f(sol.rho[k]), f(sol.u[k]), f(sol.v[k]), f(sol.p[k]), f(sol.M[k])].join(","));
+    }
+  }
+  return lines.join("\n") + "\n";
+}
 
 const FLUX_OPTIONS = ["HLLC", "HLL", "Roe", "Rusanov"];
 const CFL_SAFE = 0.5;
@@ -87,7 +105,7 @@ function Heatmap({ sol, field, lo, hi, Lx, Ly, smooth, cut, hover, onHover, onCu
   const geo = useRef(null);
   const off = useRef(null);
   const ref = useCanvas((ctx, W, H) => {
-    ctx.fillStyle = "#101317"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = THEME.stage; ctx.fillRect(0, 0, W, H);
     if (!sol || !field) return;
     const { Nx, Ny } = sol;
     // fit the domain's aspect ratio inside the canvas
@@ -121,10 +139,10 @@ function Heatmap({ sol, field, lo, hi, Lx, Ly, smooth, cut, hover, onHover, onCu
     ctx.moveTo(Math.round(X(cut.x)) + 0.5, iy); ctx.lineTo(Math.round(X(cut.x)) + 0.5, iy + ih);
     ctx.stroke(); ctx.setLineDash([]);
     if (hover) {
-      ctx.strokeStyle = "#d7a33c";
+      ctx.strokeStyle = THEME.cursor;
       ctx.beginPath(); ctx.arc(X(hover.x), Y(hover.y), 5, 0, Math.PI * 2); ctx.stroke();
     }
-    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.strokeStyle = THEME.axis;
     ctx.strokeRect(ix + 0.5, iy + 0.5, iw - 1, ih - 1);
   }, [sol, field, lo, hi, Lx, Ly, smooth, cut, hover]);
 
@@ -296,6 +314,12 @@ function App() {
             <Toggle checked={smooth} onChange={setSmooth} label="smooth interpolation" />
             <Toggle checked={showSlices} onChange={setShowSlices} label="line-outs along the cuts" />
             <button className="btn" onClick={() => setCutF({ x: 0.5, y: 0.5 })}>Reset cuts to centre</button>
+          </Section>
+          <Section title="Export">
+            <button className="btn" disabled={!sol}
+                    onClick={() => downloadText(preset.replace(/[^A-Za-z0-9._-]+/g, "_") + "_t=" + frame.t.toExponential(3) + ".csv",
+                                                fields2DToCSV(sol, frame.t, preset), "text/csv")}>Export CSV (current time)</button>
+            <div className="note">All cells: x, y, ρ, u, v, p, M (non-dimensional).</div>
           </Section>
         </aside>
 

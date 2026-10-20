@@ -1,0 +1,24 @@
+{
+  "_comment": "Conditions from the headers of the NPARC data files: T0 = 300 K, P0/Patm = 1.195, Pexit/P0 = 0.82 (weak shock) and 0.72 (strong shock). Geometry in inches; x/H* measured from the throat.",
+  "gas": { "name": "air", "model": "thermally-perfect" },
+  "p0": 121083.375,
+  "T0": 300,
+  "numerics": { "N": 400, "cfl": 0.4, "flux": "HLLC", "steadyTol": 1e-6, "maxTransits": 200 },
+  "boundaryLayer": {
+    "_comment": "Turbulent integral boundary layer on the top and bottom walls (boundary.js), started at the duct inlet. The inlet momentum thickness is not in the data: theta0 is a sensitivity sweep, not a fit. Side-wall layers are not modelled.",
+    "geometry": "channel", "nWalls": 2, "theta0": [0, 0.0002, 0.0004], "N": 300
+  },
+  "geometry": {
+    "upper": "data/upper.pts",
+    "lower": "data/lower.pts",
+    "columns": { "x": 0, "y": 1 },
+    "lengthScale": 0.0254,
+    "xThroat": 0
+  },
+  "cases": {
+    "weak":   { "file": "data/sajwpres.data", "exitPressureRatio": 0.82, "xScale": "throat-heights", "pIsRatio": true,
+                "walls": [ { "name": "bottom", "x": 0, "p": 1 }, { "name": "top", "x": 2, "p": 3 } ] },
+    "strong": { "file": "data/sajspres.data", "exitPressureRatio": 0.72, "xScale": "throat-heights", "pIsRatio": true,
+                "walls": [ { "name": "bottom", "x": 0, "p": 1 }, { "name": "top", "x": 2, "p": 3 } ] }
+  }
+}

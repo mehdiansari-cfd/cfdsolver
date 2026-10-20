@@ -24,19 +24,62 @@
 (function () {
   "use strict";
   const h = React.createElement;
-  const { useState, useEffect, useRef, useCallback } = React;
+  const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
-  // ---------- Theme (mirrors lab.css tokens; canvases can't read CSS vars cheaply) ----------
+  // ---------- Theme ----------
+  // Canvases can't use CSS variables, so THEME holds the current values of
+  // the lab.css tokens: readTheme() refreshes it, and a theme switch fires
+  // THEME_EVENT so every useCanvas redraws. Defaults are the dark theme.
   const THEME = {
-    plotBg:   "#101317",
-    grid:     "#1f242b",
-    axis:     "#3a414c",
-    tick:     "#7d8794",
-    series:   "#e2724b",   // numerical solution — one role, one colour, every plot
-    ref:      "#98a0ab",   // analytical reference — neutral, dashed
-    cursor:   "#d7a33c",
-    font:     "10px ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace"
+    plotBg: "#15181d", stage: "#0f1114", grid: "#1f242a", axis: "#343a43", tick: "#7d8794", ink: "#e8eaed",
+    series: "#d9653f", data: "#4a8fe0", ref: "#98a0ab", ref2: "#5fb3a3", cursor: "#d7a33c", accent: "#e2724b",
+    wall: "#c8ccd2",
+    font: "10px ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace"
   };
+  const THEME_TOKENS = {
+    plotBg: "--plot", stage: "--stage", grid: "--grid", axis: "--axis", tick: "--tick", ink: "--ink",
+    series: "--series", data: "--data", ref: "--ref", ref2: "--ref2", cursor: "--accent-2", accent: "--accent",
+    wall: "--wall"
+  };
+  const THEME_EVENT = "eulerlab-theme";
+  const THEME_KEY = "eulerlab-theme";
+  function readTheme() {
+    const cs = getComputedStyle(document.documentElement);
+    for (const k in THEME_TOKENS) { const v = cs.getPropertyValue(THEME_TOKENS[k]).trim(); if (v) THEME[k] = v; }
+  }
+  function currentTheme() {
+    const t = document.documentElement.dataset.theme;
+    if (t === "light" || t === "dark") return t;
+    return window.matchMedia && matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  }
+  // pref: "light" | "dark" | "system" (follow the operating system; nothing stored)
+  function setTheme(pref) {
+    const root = document.documentElement;
+    if (pref === "light" || pref === "dark") root.dataset.theme = pref; else delete root.dataset.theme;
+    try {
+      if (pref === "light" || pref === "dark") localStorage.setItem(THEME_KEY, pref); else localStorage.removeItem(THEME_KEY);
+    } catch (e) { /* private mode: the choice just isn't remembered */ }
+    readTheme();
+    window.dispatchEvent(new Event(THEME_EVENT));
+  }
+  function themePreference() {
+    const t = document.documentElement.dataset.theme;
+    return t === "light" || t === "dark" ? t : "system";
+  }
+  readTheme();
+  if (window.matchMedia) {
+    matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { readTheme(); window.dispatchEvent(new Event(THEME_EVENT)); });
+  }
+  // Re-render on theme switches (components that draw with THEME).
+  function useThemeVersion() {
+    const [v, setV] = useState(0);
+    useEffect(() => {
+      const f = () => setV(n => n + 1);
+      window.addEventListener(THEME_EVENT, f);
+      return () => window.removeEventListener(THEME_EVENT, f);
+    }, []);
+    return v;
+  }
 
   // ---------- Number formatting ----------
   function fmt(v, digits) {
@@ -291,10 +334,11 @@
     const ref = useRef(null);
     const drawRef = useRef(draw);
     drawRef.current = draw;
+    const themeV = useThemeVersion();
     useEffect(() => {
       const cv = ref.current; if (!cv) return;
       const f = fitCanvas(cv); drawRef.current(f.ctx, f.W, f.H);
-    }, deps);
+    }, (deps || []).concat([themeV]));
     useEffect(() => {
       const cv = ref.current; if (!cv || typeof ResizeObserver === "undefined") return;
       const ro = new ResizeObserver(() => { const f = fitCanvas(cv); drawRef.current(f.ctx, f.W, f.H); });
@@ -339,6 +383,7 @@
     if (!o.x || o.x.length < 2 || pw <= 0 || ph <= 0) return null;
 
     const tr = o.logY ? (v => Math.log10(Math.max(v, 1e-300))) : (v => v);
+    const pts = o.points || null;
     let lo = tr(o.lo), hi = tr(o.hi);
     if (!(hi > lo)) { const c = Number.isFinite(lo) ? lo : 0; lo = c - 0.5; hi = c + 0.5; }
     // A nearly constant series (e.g. steady mass flow) spans at least
@@ -366,13 +411,9 @@
                    .replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, ""), pad.l - 6, py);
     }
     ctx.textAlign = "center"; ctx.textBaseline = "top";
-    for (const v of niceTicks(xMin, xMax, 5)) {
-      const px = Math.round(X(v)) + 0.5;
-      ctx.beginPath(); ctx.moveTo(px, pad.t); ctx.lineTo(px, pad.t + ph); ctx.stroke();
-      ctx.fillText(String(+v.toFixed(6)), px, pad.t + ph + 6);
-    }
-    ctx.strokeStyle = THEME.axis;
-    ctx.strokeRect(pad.l + 0.5, pad.t + 0.5, pw - 1, ph - 1);
+    for (const v of niceTicks(xMin, xMax, 5)) ctx.fillText(String(+v.toFixed(6)), Math.round(X(v)) + 0.5, pad.t + ph + 6);
+    ctx.strokeStyle = THEME.axis;                       // baseline only: horizontal grid, no box
+    ctx.beginPath(); ctx.moveTo(pad.l, pad.t + ph + 0.5); ctx.lineTo(pad.l + pw, pad.t + ph + 0.5); ctx.stroke();
 
     ctx.save();
     ctx.beginPath(); ctx.rect(pad.l, pad.t, pw, ph); ctx.clip();
@@ -390,7 +431,17 @@
       ctx.stroke(); ctx.setLineDash([]);
     };
     if (o.ref) line(o.ref, THEME.ref, 1.25, [4, 3]);
+    if (o.ref2) line(o.ref2, THEME.ref2, 1.5, [8, 3]);
     line(o.y, THEME.series, 2);
+    if (pts) {                                   // measured data: hollow 8 px markers with a surface ring
+      for (const q of pts) {
+        if (!Number.isFinite(q.y) || q.x < xMin || q.x > xMax) continue;
+        const px = X(q.x), py = Y(q.y);
+        ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2);
+        ctx.lineWidth = 4; ctx.strokeStyle = THEME.plotBg; ctx.stroke();
+        ctx.lineWidth = 1.75; ctx.strokeStyle = THEME.data; ctx.stroke();
+      }
+    }
 
     // linked hover cursor
     let hit = null;
@@ -468,13 +519,21 @@
   // Canvas line plot with a linked hover cursor and a live readout.
   // Hovering reports a domain x through onHover so every plot (and the
   // field view) can show the same probe position.
-  function PlotCard({ title, x, y, refY: refArr, hoverX, onHover, resetKey, logY, refLabel, wide }) {
-    const [rlo, rhi] = finiteRange(logY ? [y] : [y, refArr]);
+  // yScale converts SI values for display (e.g. 1e-3 for Pa → kPa); points are
+  // measured data [{x, y}] in display units, drawn as hollow markers.
+  function PlotCard({ title, x, y: yRaw, refY: refRaw, hoverX, onHover, resetKey, logY, refLabel, wide,
+                      yScale, points, pointsLabel, ref2: ref2Raw, ref2Label }) {
+    const sc = yScale || 1;
+    const y = useMemo(() => (sc === 1 || !yRaw ? yRaw : Array.from(yRaw, v => v * sc)), [yRaw, sc]);
+    const refArr = useMemo(() => (sc === 1 || !refRaw ? refRaw : Array.from(refRaw, v => v * sc)), [refRaw, sc]);
+    const ref2 = useMemo(() => (sc === 1 || !ref2Raw ? ref2Raw : Array.from(ref2Raw, v => v * sc)), [ref2Raw, sc]);
+    const ptsY = points ? points.map(q => q.y) : null;
+    const [rlo, rhi] = finiteRange(logY ? [y] : [y, refArr, ref2, ptsY]);
     const [lo, hi] = useSmoothRange(rlo, rhi, resetKey);
     const geo = useRef(null);
     const cvRef = useCanvas((ctx, W, H) => {
-      geo.current = drawPlot(ctx, W, H, { x, y, ref: refArr, lo, hi, logY, hoverX });
-    }, [x, y, refArr, lo, hi, logY, hoverX]);
+      geo.current = drawPlot(ctx, W, H, { x, y, ref: refArr, ref2, lo, hi, logY, hoverX, points });
+    }, [x, y, refArr, ref2, lo, hi, logY, hoverX, points]);
 
     const onMove = e => {
       const g = geo.current; if (!g || !onHover) return;
@@ -488,15 +547,18 @@
                 Math.round(((hoverX - x[0]) / (x[x.length - 1] - x[0])) * (x.length - 1))));
       readout = h("span", { className: "readout" },
         h("b", null, fmt(y[i])),
-        refArr && Number.isFinite(refArr[i]) ? h("span", { className: "muted" }, " · ref " + fmt(refArr[i])) : null);
+        refArr && Number.isFinite(refArr[i]) ? h("span", { className: "muted" }, " · ref " + fmt(refArr[i])) : null,
+        ref2 && Number.isFinite(ref2[i]) ? h("span", { className: "muted" }, " · " + (ref2Label || "ref 2") + " " + fmt(ref2[i])) : null);
     }
     return h("figure", { className: "plot-card" + (wide ? " wide" : "") },
       h("figcaption", null,
         h("span", { className: "plot-title" }, title),
         readout,
-        refArr ? h("span", { className: "legend" },
+        refArr || ref2 || points ? h("span", { className: "legend" },
           h("i", { className: "sw-num" }), "numerical",
-          h("i", { className: "sw-ref" }), refLabel || "exact") : null),
+          refArr ? h("i", { className: "sw-ref" }) : null, refArr ? (refLabel || "exact") : null,
+          ref2 ? h("i", { className: "sw-ref2" }) : null, ref2 ? (ref2Label || "ref 2") : null,
+          points ? h("i", { className: "sw-data" }) : null, points ? (pointsLabel || "data") : null) : null),
       h("canvas", { ref: cvRef, className: "plot-canvas", onMouseMove: onMove,
                     onMouseLeave: () => onHover && onHover(null) }));
   }
@@ -507,7 +569,9 @@
     idle: "idle", computing: "computing", playing: "playing",
     buffering: "buffering", ready: "ready", error: "error", stale: "params changed"
   };
-  function Transport({ player, stale, onSolve, onPlay, info }) {
+  // tUnit = { scale, label } shows time in display units (e.g. ms for SI runs).
+  function Transport({ player, stale, onSolve, onPlay, info, tUnit }) {
+    const ts = tUnit ? tUnit.scale : 1, tl = tUnit ? " " + tUnit.label : "";
     const p = player;
     const status = stale ? "stale" : (p ? p.status() : "idle");
     const tEnd = p ? p.tEnd : 1;
@@ -536,26 +600,67 @@
                     onChange: e => p && p.setSpeed(parseFloat(e.target.value)) },
         SPEEDS.map(s => h("option", { key: s, value: s }, s + "×"))),
       h("div", { className: "clock" },
-        h("span", null, h("span", { className: "muted" }, "t "), fmt(cursor, 4)),
-        h("span", { className: "muted" }, " / " + fmt(tEnd, 3))),
+        h("span", null, h("span", { className: "muted" }, "t "), fmt(cursor * ts, 4)),
+        h("span", { className: "muted" }, " / " + fmt(tEnd * ts, 3) + tl)),
       info ? h("div", { className: "meta" }, info) : null,
       h("span", { className: "chip chip-" + status }, STATUS_TEXT[status] || status));
   }
 
   // ---------- Top bar with page tabs ----------
+  const LAB_TABS = [
+    { id: "shocktube", label: "Shock tube", href: "lab.html#shocktube" },
+    { id: "nozzle",    label: "Nozzle",     href: "lab.html#nozzle" },
+    { id: "facility",  label: "Facility",   href: "lab.html#facility" },
+    { id: "verify",    label: "Verify",     href: "lab.html#verify" },
+    { id: "2d",        label: "2D field",   href: "index2d.html" }
+  ];
+  const THEME_OPTIONS = [{ value: "system", label: "System" }, { value: "light", label: "Light" }, { value: "dark", label: "Dark" }];
+  const GEAR_PATH = "M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z" +
+    "M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z";
+
+  // Settings drawer: appearance (system / light / dark). Opened from the gear in the top bar.
+  function SettingsDrawer({ open, onClose }) {
+    const [pref, setPref] = useState(themePreference);
+    useEffect(() => {
+      const f = () => setPref(themePreference());
+      window.addEventListener(THEME_EVENT, f);
+      return () => window.removeEventListener(THEME_EVENT, f);
+    }, []);
+    useEffect(() => {
+      if (!open) return;
+      const onKey = e => { if (e.key === "Escape") onClose(); };
+      window.addEventListener("keydown", onKey);
+      return () => window.removeEventListener("keydown", onKey);
+    }, [open]);
+    if (!open) return null;
+    return h("div", { className: "drawer-backdrop", onClick: onClose },
+      h("aside", { className: "drawer", onClick: e => e.stopPropagation(), role: "dialog", "aria-label": "Settings" },
+        h("button", { className: "btn icon drawer-close", onClick: onClose, "aria-label": "Close" }, "×"),
+        h("h2", null, "Settings"),
+        h("h3", null, "Appearance"),
+        h("div", { className: "setting" },
+          h("div", null,
+            h("div", { className: "setting-title" }, "Theme"),
+            h("p", { className: "setting-note" },
+              pref === "system" ? "Follows your system setting (now " + currentTheme() + ")." : "Applies to every page of the lab and is remembered on this device.")),
+          h(Segmented, { label: "Theme", value: pref, options: THEME_OPTIONS, onChange: setTheme }))));
+  }
+
   function TopBar({ active, scheme, onHelp }) {
-    const tabs = [
-      { id: "shocktube", label: "Shock tube", href: "index.html#shocktube" },
-      { id: "nozzle",    label: "Nozzle",     href: "index.html#nozzle" },
-      { id: "2d",        label: "2D field",   href: "index2d.html" }
-    ];
+    const [settingsOpen, setSettingsOpen] = useState(false);
     return h("header", { className: "topbar" },
-      h("div", { className: "brand" }, h("span", { className: "brand-mark" }, "∂U/∂t"), "Euler Lab"),
-      h("nav", { className: "tabs" },
-        tabs.map(t => h("a", { key: t.id, href: t.href, className: "tab" + (t.id === active ? " on" : "") }, t.label))),
+      h("a", { className: "brand", href: "index.html", title: "Back to the start page" },
+        h("span", { className: "brand-mark", "aria-hidden": true }), "Euler Lab"),
+      h("nav", { className: "tabs", "aria-label": "Workspaces" },
+        LAB_TABS.map(t => h("a", { key: t.id, href: t.href, className: "tab" + (t.id === active ? " on" : ""),
+                                   "aria-current": t.id === active ? "page" : undefined }, t.label))),
       h("div", { className: "topbar-right" },
         scheme ? h("span", { className: "scheme" }, scheme) : null,
-        h("button", { className: "btn icon", onClick: onHelp, title: "Help & shortcuts (?)", "aria-label": "Help" }, "?")));
+        h("button", { className: "btn icon ghost", onClick: () => setSettingsOpen(true), title: "Settings", "aria-label": "Settings" },
+          h("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": true },
+            h("path", { d: GEAR_PATH }))),
+        h("button", { className: "btn icon ghost", onClick: onHelp, title: "Help & shortcuts (?)", "aria-label": "Help" }, "?")),
+      h(SettingsDrawer, { open: settingsOpen, onClose: () => setSettingsOpen(false) }));
   }
 
   function HelpDrawer({ open, onClose, children }) {
@@ -605,9 +710,64 @@
       items.map(([k, v]) => h("span", { key: k }, h("span", { className: "muted" }, k + " "), fmt(v))));
   }
 
+  // ---------- Files: download text, pick a local text file ----------
+  function downloadText(name, text, mime) {
+    const url = URL.createObjectURL(new Blob([text], { type: mime || "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+  function pickTextFile(accept) {
+    return new Promise((resolve, reject) => {
+      const inp = document.createElement("input");
+      inp.type = "file"; inp.accept = accept || "";
+      inp.onchange = () => {
+        const f = inp.files && inp.files[0];
+        if (!f) return reject(new Error("No file chosen"));
+        f.text().then(text => resolve({ name: f.name, text }), reject);
+      };
+      inp.click();
+    });
+  }
+  // Rows of a CSV / whitespace table whose cells are all numbers (headers skipped).
+  function numericTable(text) {
+    const rows = [];
+    for (const line of text.split(/\r?\n/)) {
+      const cells = line.trim().split(/[\s,;]+/).filter(Boolean).map(Number);
+      if (cells.length >= 2 && cells.every(Number.isFinite)) rows.push(cells);
+    }
+    return rows;
+  }
+
+  // ---------- Drive a generator in time slices between animation frames ----------
+  // onYield(value) after each slice; onDone(result) / onError(err). Returns cancel().
+  function runSliced(gen, onYield, onDone, onError, sliceMs) {
+    let dead = false, raf = null;
+    const budget = sliceMs || 12;
+    const tick = () => {
+      raf = null;
+      if (dead) return;
+      const t0 = performance.now();
+      try {
+        let last;
+        while (performance.now() - t0 < budget) {
+          const r = gen.next();
+          if (r.done) { onDone(r.value); return; }
+          last = r.value;
+        }
+        if (last !== undefined) onYield(last);
+      } catch (e) { onError(e); return; }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => { dead = true; if (raf) cancelAnimationFrame(raf); };
+  }
+
   window.LabUI = {
-    THEME, fmt, niceTicks, CMAP, colormap,
+    THEME, readTheme, setTheme, currentTheme, themePreference, useThemeVersion, fmt, niceTicks, CMAP, colormap,
     Player, usePlayer, fitCanvas, useCanvas, useSmoothRange, finiteRange, drawPlot, useShortcuts,
-    NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, Colorbar, Probe
+    NumField, SelectField, Section, Segmented, Toggle, PlotCard, Transport, TopBar, HelpDrawer, SettingsDrawer, Colorbar, Probe,
+    downloadText, pickTextFile, numericTable, runSliced
   };
 })();
