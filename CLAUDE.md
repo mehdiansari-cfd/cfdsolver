@@ -87,7 +87,7 @@ cfdsolver/
 ├── verify.js       Order-of-accuracy studies, Celik et al. GCI; runs as generators
 ├── solver2d.js     2D Cartesian Euler: 2D-aware HLLC/HLL/Roe/Rusanov, MUSCL, SSP-RK2
 ├── cases/          Example case files
-├── validation/     Sajben diffuser harness (experimental data not yet added — never fake it)
+├── validation/     Sajben diffuser comparison with the unmodified NPARC data (never edit or invent data)
 ├── test.js         Zero-dependency Node verification suite
 └── docs/           Screenshot/GIF capture guide + suggested repo metadata
 ```
@@ -221,7 +221,7 @@ In the calorically perfect limit `facilityAnalysis` must reproduce the shock-tub
 **Design order must be measured on a smooth problem**: the periodic density wave (`"smooth-advection"`) reaches L1 order ≈ 1.9 (2 by design; minmod clips extrema, so L∞ ≈ 1.3). Sod converges at L1 ≈ 0.85 for *any* scheme because of its discontinuities — it is a correctness check, not an order test. Solution verification uses the three-grid GCI of Celik et al. (2008); `test.js` checks that the GCI bands contain the exact answer for the nozzle shock position and the real-gas plateau density.
 
 ### Experimental validation
-`validation/sajben.js` compares the quasi-1D nozzle with the Sajben diffuser wall pressures. The NPARC data files are **not** in the repo; the script skips until they are added. Never commit invented or "representative" experimental numbers.
+`validation/sajben.js` compares the quasi-1D nozzle with the Sajben diffuser wall pressures (unmodified NPARC files in `validation/sajben/data/`). Expected: RMS Δ(p/p₀) ≈ 0.02 ahead of the shock and ≤ 0.035 in the recovered flow; the inviscid shock lies 1.0–1.8 H* **aft** of the measured one (no boundary layer / separation) — that is a model limit, not a bug, and must not be "tuned away". `test.js` checks these. Never edit the data files or commit invented or "representative" experimental numbers.
 
 ---
 
@@ -282,7 +282,8 @@ Already shipped: HLL, HLLC, Roe, Rusanov; SSP-RK2; the quasi-1D nozzle with area
 - [x] Case files, CSV export, headless CLI with sweeps.
 - [x] Order-of-accuracy studies and GCI.
 - [x] Shock-tube facility analysis.
-- [ ] Sajben experimental comparison — harness ready, data files to be added by the maintainer.
+- [x] Sajben experimental comparison (NPARC data).
+- [ ] Boundary-layer displacement correction for quasi-1D (would move the Sajben shock upstream).
 - [ ] Equilibrium / finite-rate chemistry (frozen composition only today).
 - [ ] Fanno (friction) and Rayleigh (heat addition) source terms.
 - [ ] Quasi-conservative two-gas formulation (removes the interface blip).

@@ -447,6 +447,30 @@ check("GCI bands contain the exact answer: shock position (nozzle) and rho_2 (re
   }
 });
 
+// ---- 11. Experimental validation: Sajben transonic diffuser -------------------
+// NPARC wall-pressure data (validation/sajben). Quasi-1D inviscid flow must
+// match the isentropic acceleration upstream of the shock and the recovered
+// pressure downstream. It is expected to put the shock too far aft (no
+// boundary-layer displacement or separation): that error is reported by
+// node validation/sajben.js, and only its sign is checked here.
+
+console.log("Validation (Sajben diffuser, NPARC data):");
+
+check("Sajben weak/strong shock: upstream & recovery match data; shock aft of measured", () => {
+  const SJ = require("./validation/sajben.js");
+  const r = SJ.main({ N: 200, write: false, quiet: true });
+  if (r === null) { console.log("       (data files absent: skipped)"); return; }
+  const cellH = 0.13;                                            // two cells at N = 200, in throat heights
+  for (const [name, c] of Object.entries(r)) {
+    assert(Math.abs(c.shock_xH_computed - c.shock_xH_exactQuasi1D) < cellH, name + ": numerical shock vs exact quasi-1D");
+    for (const [w, v] of Object.entries(c.walls)) {
+      assert(v.upstream.rmsDeltaP < 0.03, name + "/" + w + ": upstream RMS Δp/p0 " + v.upstream.rmsDeltaP.toFixed(4));
+      assert(v.downstream.rmsDeltaP < 0.05, name + "/" + w + ": recovered-flow RMS Δp/p0 " + v.downstream.rmsDeltaP.toFixed(4));
+      assert(v.shock_xH_error > 0, name + "/" + w + ": inviscid shock should sit aft of the measured one");
+    }
+  }
+});
+
 // ---- summary ---------------------------------------------------------------
 
 console.log("");

@@ -40,7 +40,7 @@ That's the whole setup. Each page loads React and Babel-standalone from a CDN, t
 - **1D shock tube** — the Riemann problem with one gas or two (driver / driven), against an exact real-gas Riemann solution.
 - **Quasi-1D nozzle** — analytic or tabulated (CSV) area profiles, a stagnation reservoir and a back pressure; compared with the exact steady quasi-1D solution in every regime, including the location of a normal shock. Measured p/p₀ data can be overlaid.
 - **Shock-tube facility** — design a reflected-shock tube: driver/driven gases, fill pressures and lengths → incident and reflected shock conditions (states 1–5), tailoring, test time, the p₄ for a target Mₛ, and an x–t wave diagram from a two-gas simulation.
-- **Verification** — order-of-accuracy studies and grid convergence index (GCI) error bars, in the browser and from Node; a harness for the Sajben transonic-diffuser experiment (data files to be added).
+- **Verification and validation** — order-of-accuracy studies and grid convergence index (GCI) error bars, in the browser and from Node; comparison with the Sajben transonic-diffuser experiment (NPARC data).
 - **Case files and CLI** — save / load JSON cases, export CSV, and run any case headless with `node run.js`, including parameter sweeps.
 - **2D Cartesian** — full 2D Euler on a Cartesian grid (non-dimensional), with the radial Sod problem, the Lax–Liu four-quadrant Riemann (config 3), the Sedov point blast and the Kelvin–Helmholtz instability.
 
@@ -96,7 +96,7 @@ The solvers ship with a zero-dependency verification suite. Run it with:
 node test.js
 ```
 
-It uses only Node's built-in modules — no test framework, no dev-dependencies — and [CI runs it on every push and pull request](.github/workflows/test.yml). 26 checks in about a minute:
+It uses only Node's built-in modules — no test framework, no dev-dependencies — and [CI runs it on every push and pull request](.github/workflows/test.yml). 27 checks in about a minute and a half:
 
 | Area | What is checked |
 |------|-----------------|
@@ -110,6 +110,7 @@ It uses only Node's built-in modules — no test framework, no dev-dependencies 
 | Facility | shock-tube equation, p₅/p₂ and the Mr–Mₛ relation to 10⁻⁶; a two-gas simulation reproduces the reflection time, p₅ and T₅ to < 1% and the under-tailored pressure rise |
 | Case files / CLI | validation messages; `node run.js` output, `--set`, `--sweep` |
 | Verification | GCI recovers p = 2; smooth-wave L1 order > 1.8; GCI bands contain the exact answer |
+| Validation | Sajben diffuser: pressure ahead of the shock and in the recovered flow match the NPARC data; inviscid shock lies aft of the measured one |
 
 ### Verification: order of accuracy and grid convergence index
 
@@ -124,9 +125,20 @@ Matching Sod shows the code is coded correctly; it does not say how large the di
   | Unchoked nozzle mass flow | 0.49287 | 0.48242 | 0.48196 | ±2.7% |
   | Real-gas shock-tube plateau ρ₂ [kg/m³] | 2.37727 | 2.37781 | 2.37689 | ±0.03% |
 
-### Validation against experiment
+### Validation against experiment: the Sajben transonic diffuser
 
-Verification shows the equations are solved right; validation shows they are the right equations for real hardware. [`validation/sajben.js`](validation/sajben.js) compares the quasi-1D nozzle with the wall pressures measured in the Sajben transonic diffuser (NPARC Alliance Validation Archive). **The experimental files are not in the repository yet**: the archive was unreachable from the environment this was built in, and no stand-in data is included. Add the files and conditions as described in [`validation/sajben/README.md`](validation/sajben/README.md) and run `node validation/sajben.js`; until then it reports that it was skipped. The Nozzle tab's **Load p/p₀ CSV** overlays any measured pressure distribution on the solution.
+Verification shows the equations are solved right; validation shows how well they describe real hardware. [`validation/sajben.js`](validation/sajben.js) compares the quasi-1D nozzle (thermally perfect air) with the wall pressures measured in the Sajben transonic diffuser, using the unmodified data files from the NPARC Alliance Validation Archive (conditions T₀ = 300 K, p₀ = 121 kPa, p_exit/p₀ = 0.82 and 0.72).
+
+| Weak shock (p_exit/p₀ = 0.82) | Strong shock (p_exit/p₀ = 0.72) |
+|:--:|:--:|
+| ![Sajben diffuser, weak shock: quasi-1D Euler vs measured wall pressure](docs/validation/sajben-weak.svg) | ![Sajben diffuser, strong shock: quasi-1D Euler vs measured wall pressure](docs/validation/sajben-strong.svg) |
+
+| Case | RMS Δ(p/p₀) ahead of the shock | Shock x/H*: computed vs measured | RMS Δ(p/p₀) in the recovered flow |
+|------|------|------|------|
+| weak  | 0.02 | 2.53 vs 1.35–1.49 | 0.01 |
+| strong | 0.02 | 3.89 vs 2.12–2.35 | 0.03 |
+
+The isentropic acceleration through the throat and the recovered exit pressure match the measurements to about 2% of p₀. **The shock is predicted 1.0–1.8 throat heights too far downstream**, with a sharper jump than measured: an inviscid quasi-1D model has no boundary layer, while in the experiment the displacement thickness (and, in the strong case, shock-induced separation) shrinks the effective area and pulls the shock upstream. The numerical shock agrees with the exact quasi-1D solution to 0.02 H*, so this gap is the model's, not the discretisation's — exactly the kind of limit a validation case is meant to expose. Details in [`validation/sajben/README.md`](validation/sajben/README.md); the cases are in [`cases/sajben-weak.json`](cases/sajben-weak.json) / [`cases/sajben-strong.json`](cases/sajben-strong.json), and the measurements can be overlaid in the Nozzle tab with **Load p/p₀ CSV** ([`cases/sajben-weak-measured.csv`](cases/sajben-weak-measured.csv)).
 
 See [`test.js`](test.js) for the exact tolerances and setups, and [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a case.
 
@@ -314,7 +326,7 @@ cfdsolver/
 ├── verify.js           Order-of-accuracy studies and grid convergence index (GCI)
 ├── solver2d.js         2D Cartesian Euler: 2D-aware HLLC/HLL/Roe/Rusanov, MUSCL, SSP-RK2
 ├── cases/              Example case files and an area-profile CSV
-├── validation/         Sajben diffuser harness (experimental data to be added)
+├── validation/         Sajben diffuser comparison with the NPARC data
 ├── test.js             Zero-dependency Node verification suite (see Validation)
 ├── CONTRIBUTING.md     Contribution guide (the buildless / no-dependency rule)
 ├── LICENSE             MIT
@@ -500,7 +512,7 @@ The choice of methods follows Toro's and Anderson's textbooks closely:
 
 The lab is deliberately small and pedagogical. A non-exhaustive list of things it does *not* do (and could):
 
-- Experimental validation data: the Sajben harness is in place but the NPARC files still need to be added.
+- Boundary-layer effects: a displacement-thickness correction to A(x) would move the Sajben shock toward the measured position.
 - Chemistry: equilibrium or finite-rate composition (dissociation above ~2500 K), not just frozen mixtures.
 - Higher-order reconstruction (PPM, WENO5, MP5) and more limiters.
 - Other source terms (friction / Fanno, heat addition / Rayleigh, gravity, cylindrical / spherical 1D).
