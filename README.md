@@ -1,6 +1,6 @@
 # Euler Laboratory
 
-A self-contained, browser-based playground for the compressible Euler equations — shock tubes, quasi-1D nozzles, and 2D Cartesian flows on a shared finite-volume engine. No build step, no dependencies, no server.
+A self-contained compressible-flow lab for the Euler equations — shock tubes, quasi-1D nozzles, a reflected-shock-tube facility designer, and 2D Cartesian flows on a shared finite-volume engine. Real gases in SI units (air, N₂, O₂, Ar, He, H₂, CO₂, combustion products; γ = γ(T) from NASA polynomials), JSON case files, CSV output, a headless command-line runner, and built-in verification (order of accuracy, grid convergence index). No build step, no dependencies, no server.
 
 ## Quickstart in 30 seconds
 
@@ -12,8 +12,12 @@ Or run it locally:
 git clone https://github.com/mehdiansari-cfd/cfdsolver.git
 cd cfdsolver
 # then just open the HTML files in a browser:
-open index.html        # 1D shock tube + nozzle   (macOS; use `start` on Windows, `xdg-open` on Linux)
+open index.html        # shock tube, nozzle, facility, verify   (macOS; `start` on Windows, `xdg-open` on Linux)
 open index2d.html      # 2D Cartesian
+
+# or headless, from scripts and parameter sweeps (Node ≥ 18, nothing to install):
+node run.js cases/air-shocktube.json
+node run.js cases/nozzle-m2.json --sweep pb=24000,150000,200000,280000
 ```
 
 That's the whole setup. Each page loads React and Babel-standalone from a CDN, then the solver math, and renders. There is no toolchain, no `npm install`, no bundler.
@@ -32,13 +36,15 @@ That's the whole setup. Each page loads React and Babel-standalone from a CDN, t
 
 ## What's inside
 
-- **1D shock tube** — the classic Riemann problem with shocks, contacts, and rarefactions.
-- **Quasi-1D nozzle** — convergent, divergent, or convergent-divergent (CD) duct driven by a stagnation reservoir at the inlet and a static back-pressure at the exit; reproduces subsonic, choked, normal-shock-in-divergent, and fully supersonic flow regimes.
-- **2D Cartesian** — full 2D Euler on a Cartesian grid, with presets for the radial Sod problem, the Lax–Liu four-quadrant Riemann (config 3), the Sedov point-blast wave, and the Kelvin–Helmholtz shear instability.
+- **Real gases, SI units** — pick air, N₂, O₂, Ar, He, H₂, CO₂ or frozen CH₄–air / H₂–air products; calorically perfect (γ fixed at 298 K) or thermally perfect (γ = γ(T), NASA-7 polynomials). The legacy non-dimensional ideal gas (γ, R = 1) is still there for the textbook problems.
+- **1D shock tube** — the Riemann problem with one gas or two (driver / driven), against an exact real-gas Riemann solution.
+- **Quasi-1D nozzle** — analytic or tabulated (CSV) area profiles, a stagnation reservoir and a back pressure; compared with the exact steady quasi-1D solution in every regime, including the location of a normal shock. Measured p/p₀ data can be overlaid.
+- **Shock-tube facility** — design a reflected-shock tube: driver/driven gases, fill pressures and lengths → incident and reflected shock conditions (states 1–5), tailoring, test time, the p₄ for a target Mₛ, and an x–t wave diagram from a two-gas simulation.
+- **Verification** — order-of-accuracy studies and grid convergence index (GCI) error bars, in the browser and from Node; a harness for the Sajben transonic-diffuser experiment (data files to be added).
+- **Case files and CLI** — save / load JSON cases, export CSV, and run any case headless with `node run.js`, including parameter sweeps.
+- **2D Cartesian** — full 2D Euler on a Cartesian grid (non-dimensional), with the radial Sod problem, the Lax–Liu four-quadrant Riemann (config 3), the Sedov point blast and the Kelvin–Helmholtz instability.
 
-All three modules share four selectable Riemann fluxes, MUSCL reconstruction, SSP-RK2 time integration, and a matching analytical reference where one exists (exact Riemann for the tube, isentropic A/A* theory for the nozzle).
-
-The math lives in `solver.js`, `nozzle.js`, and `solver2d.js` as pure modules with no DOM coupling, so you can also `require` them from Node for headless experiments, convergence studies, or test scripts.
+All modules share four selectable Riemann fluxes, MUSCL reconstruction and SSP-RK2 time integration. The math lives in `gas.js`, `solver.js`, `nozzle.js`, `facility.js`, `verify.js` and `solver2d.js` as pure modules with no DOM coupling, so you can also `require` them from Node for headless experiments, convergence studies, or test scripts.
 
 ## Who it's for
 
@@ -50,13 +56,15 @@ The math lives in `solver.js`, `nozzle.js`, and `solver2d.js` as pure modules wi
 
 ## What it solves
 
-The 1D Euler equations for an ideal calorically-perfect gas, in two flavours.
+The 1D Euler equations for an ideal gas, `p = ρRT`, either calorically perfect (constant cₚ) or thermally perfect (cₚ = cₚ(T), so γ = γ(T)). In SI units with a real gas, or non-dimensional with γ and R = 1 for the classic test problems.
 
 **Shock tube** (uniform area):
 
 ```
-dU/dt + dF(U)/dx = 0,    U = [ρ, ρu, E],    E = p/(γ-1) + ½ρu²
+dU/dt + dF(U)/dx = 0,    U = [ρ, ρu, E (, ρY)],    E = ρ e(T) + ½ρu²
 ```
+
+where `e(T) = h(T) − RT` comes from the gas model, and the optional `ρY` row carries the driver-gas mass fraction for two-gas runs.
 
 with a Riemann initial condition — two constant states separated by a diaphragm at `x = x₀`. At `t = 0` the diaphragm bursts and the resulting wave pattern (some combination of shocks, rarefactions, and a contact discontinuity) is evolved on a finite-volume grid.
 
@@ -88,13 +96,94 @@ The solvers ship with a zero-dependency verification suite. Run it with:
 node test.js
 ```
 
-It uses only Node's built-in `assert` — no test framework, no dev-dependencies — and [CI runs it on every push and pull request](.github/workflows/test.yml). It checks three things:
+It uses only Node's built-in modules — no test framework, no dev-dependencies — and [CI runs it on every push and pull request](.github/workflows/test.yml). 26 checks in about a minute:
 
-- **Accuracy.** The numerical Sod density profile is compared against the exact Riemann solution; the L1 error is ~1.5×10⁻³ at N = 800 (below a 5×10⁻³ bound) and decreases under grid refinement — the strongest evidence the scheme is correct.
-- **Positivity.** Density and pressure stay strictly positive on the two problems that stress positivity hardest: the 1D strong shock (10⁵ pressure ratio) and the 2D Sedov point blast.
-- **Conservation.** Total mass and energy are conserved to machine precision (drift ~10⁻¹⁶) while the waves remain inside a transmissive domain — as they must be for a discretely conservative finite-volume scheme with quiescent boundaries.
+| Area | What is checked |
+|------|-----------------|
+| Accuracy | Sod vs exact Riemann: L1 ≈ 1.5×10⁻³ at N = 800, decreasing under refinement |
+| Positivity | ρ, p > 0 on the 1D strong shock (10⁵ pressure ratio) and the 2D Sedov blast |
+| Conservation | mass and energy to ~10⁻¹⁶ (ideal gas) and ~10⁻¹⁴ (real gases, two gases) |
+| Gas data | cₚ(298 K) vs JANAF for N₂, O₂, Ar, H₂, CO₂ (0.1%); air R = 287.05, γ = 1.400 (298 K), 1.336 (1000 K); thermo inverses |
+| Real-gas exact Riemann | reproduces the ideal-gas exact solver on all five presets (5×10⁻⁵); calorically perfect limit reproduces the normal-shock T₂ formula |
+| Real-gas numerics | thermally perfect air and two-gas He → air (Mₛ ≈ 4.1) vs exact, every flux |
+| Nozzle | choked mass flow vs theory; exact quasi-1D solution incl. the normal-shock position (within 2 cells) and an SI air M2 tunnel (ṁ to 0.2%); PCHIP area tables |
+| Facility | shock-tube equation, p₅/p₂ and the Mr–Mₛ relation to 10⁻⁶; a two-gas simulation reproduces the reflection time, p₅ and T₅ to < 1% and the under-tailored pressure rise |
+| Case files / CLI | validation messages; `node run.js` output, `--set`, `--sweep` |
+| Verification | GCI recovers p = 2; smooth-wave L1 order > 1.8; GCI bands contain the exact answer |
+
+### Verification: order of accuracy and grid convergence index
+
+Matching Sod shows the code is coded correctly; it does not say how large the discretisation error is in a given answer. [`verify.js`](verify.js) (and the **Verify** tab) adds:
+
+- **Order of accuracy** on a smooth periodic density wave, where the design order shows: L1 order 1.89 on the finest pair (MUSCL + SSP-RK2 is second order; minmod clips extrema, so L∞ stays near 1.3). Sod by contrast converges at L1 ≈ 0.85, because discontinuities cap every scheme near first order.
+- **Grid convergence index** — the three-grid procedure of Celik et al. (*J. Fluids Eng.* 130, 2008): apparent order, Richardson extrapolation and a GCI error band. On three test quantities the exact answer falls inside the band:
+
+  | Quantity (grids 100 / 200 / 400) | Fine grid | Extrapolated | Exact | GCI |
+  |---|---|---|---|---|
+  | Normal-shock position, CD nozzle | 0.81824 | 0.81655 | 0.81634 | ±0.26% |
+  | Unchoked nozzle mass flow | 0.49287 | 0.48242 | 0.48196 | ±2.7% |
+  | Real-gas shock-tube plateau ρ₂ [kg/m³] | 2.37727 | 2.37781 | 2.37689 | ±0.03% |
+
+### Validation against experiment
+
+Verification shows the equations are solved right; validation shows they are the right equations for real hardware. [`validation/sajben.js`](validation/sajben.js) compares the quasi-1D nozzle with the wall pressures measured in the Sajben transonic diffuser (NPARC Alliance Validation Archive). **The experimental files are not in the repository yet**: the archive was unreachable from the environment this was built in, and no stand-in data is included. Add the files and conditions as described in [`validation/sajben/README.md`](validation/sajben/README.md) and run `node validation/sajben.js`; until then it reports that it was skipped. The Nozzle tab's **Load p/p₀ CSV** overlays any measured pressure distribution on the solution.
 
 See [`test.js`](test.js) for the exact tolerances and setups, and [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to add a case.
+
+---
+
+## Gases and units
+
+[`gas.js`](gas.js) provides per-unit-mass gas models in SI: `R`, `cₚ(T)`, sensible enthalpy `h(T)` and the entropy function `φ(T) = ∫cₚ/T dT`; everything else (e, γ, a, T from e or h, isentropes, stagnation states) derives from those.
+
+| Gas | Composition | γ at 298 K |
+|-----|-------------|-----------|
+| Air (dry) | N₂ 78.084, O₂ 20.946, Ar 0.934, CO₂ 0.036 % (mole) | 1.400 |
+| N₂, O₂, Ar, He, H₂, CO₂ | pure species | 1.400, 1.395, 1.667, 1.667, 1.405, 1.289 |
+| CH₄–air products | CO₂ + 2 H₂O + 7.52 N₂ (φ = 1, frozen) | 1.371 (1.252 at 2000 K) |
+| H₂–air products | H₂O + 1.88 N₂ (φ = 1, frozen) | 1.372 (1.251 at 2000 K) |
+
+- **Data:** NASA 7-coefficient polynomials, 200–6000 K (McBride, Gordon & Reno, NASA TM-4513, 1993, as distributed with Cantera). Outside that range cₚ is held constant. Fixed-composition mixtures fold into a single NASA-7 fit.
+- **Models:** *thermally perfect* (γ = γ(T)) or *calorically perfect* (cₚ frozen at 298.15 K).
+- **Limits:** composition is frozen — no dissociation, ionisation or reaction. Above roughly 2500 K real air and combustion gases dissociate and these models over-predict temperature; the UI warns when that happens. Combustion products are complete-combustion compositions, useful for γ(T) and R, not for chemistry.
+- **Units:** SI throughout the math layer and case files (Pa, K, m, s, kg); the UI shows kPa, ms and cm² where that reads better.
+- **Two gases:** different left / right gases run as a binary mixture carrying a transported mass fraction. Conservative two-gas schemes produce small spurious pressure oscillations where the interface is smeared (Abgrall 1996): expect a few-percent blip when a wave crosses it.
+
+## Shock-tube facility module
+
+[`facility.js`](facility.js) — ideal shock-tube theory for real gases, built from the exact Riemann solver:
+
+1. diaphragm burst → incident shock Mₛ and speed W, shocked test gas (2), expanded driver (3);
+2. reflection at the end wall → reflected shock (Mr) and the stagnant test gas (5);
+3. reflected shock meets the contact → the wave sent back to the end wall decides **tailoring** (tailored / under-tailored = shock / over-tailored = expansion) and when the test ends;
+4. the expansion head reflected from the driver end wall, integrated through the exact fan.
+
+It reports states 1–5, Mₛ, Mr, p₅, T₅, test time and what limits it, solves for the p₄ that gives a target Mₛ (`facilityDesignP4`), and draws the x–t wave diagram. The **Facility** tab overlays these analytic wave paths on the x–t diagram of a two-gas simulation and plots end-wall pressure and temperature histories.
+
+Checks: in the calorically perfect limit it reproduces the shock-tube equation, p₅/p₂ and the Mr–Mₛ relation to 10⁻⁶; for He → N₂ at Mₛ = 4.2 the two-gas simulation matches the reflection time, p₅ and T₅ to better than 1%, and shows the under-tailored pressure rise when the contact-reflected shock arrives. Ideal theory assumes an instant diaphragm burst and no boundary layer; real test times are shorter.
+
+| Preset | Driver → driven | p₄ / p₁ | Mₛ | T₅ |
+|--------|-----------------|---------|----|----|
+| He → N₂, tailored | He 376 kPa → N₂ 5 kPa | 75 | 3.34 | 1564 K |
+| He → Ar, kinetics | He 140 kPa → Ar 5 kPa | 28 | 2.80 | 1906 K |
+| H₂ → N₂ | H₂ 351 kPa → N₂ 5 kPa | 70 | 4.00 | 2077 K |
+| air → air, weak | air 50 kPa → air 10 kPa | 5 | 1.40 | 460 K |
+
+## Case files and the command line
+
+Every workspace can **Save case** (JSON), **Load case** and **Export CSV**. A case saved in the browser runs unchanged from Node:
+
+```bash
+node run.js case.json [--out DIR] [--set key=value]... [--sweep key=v1,v2,...] [--area profile.csv] [--quiet]
+```
+
+- `--set numerics.N=800 --set pb=2e4` overrides fields (dotted paths).
+- `--sweep pb=24000,150000,280000` runs once per value and writes `<name>.sweep.csv` with the scalar outputs (mass flow, exit Mach, regime, Mₛ, p₅, T₅, test time …).
+- `--area profile.csv` reads a two-column x, A table for the nozzle.
+- Each run writes `<name>.csv` (fields with SI units), `<name>.exact.csv` when a reference exists, snapshots and probe histories when the case asks for them, and `<name>.summary.json`.
+- Nozzle cases can run to steady state instead of a fixed time: `"steady": { "tol": 1e-5, "tMax": 0.5 }`.
+
+Example cases are in [`cases/`](cases/); the case format is documented at the top of [`case.js`](case.js).
 
 ---
 
@@ -115,13 +204,13 @@ See [`test.js`](test.js) for the exact tolerances and setups, and [`CONTRIBUTING
 
 **Four tube views.** The horizontal "inside the tube" strip can render density, schlieren-style `|∂ρ/∂x|`, pressure, or Mach number through a warm cream → rust colormap, with a colour bar.
 
-**Eight scalar plots.** Top row: ρ, u, p, e. Bottom row (toggleable): Mach M = u/a, temperature T = p/ρ (non-dim, R=1), entropy s = ln(p/ρ^γ), and sound speed a = √(γp/ρ).
+**Scalar plots.** ρ, u, p, T, plus (toggleable) Mach number, internal energy, entropy, sound speed and, for real gases, γ(T) and the driver-gas mass fraction. Non-dimensional runs use T = p/ρ (R = 1) and s = ln(p/ρ^γ); SI runs use kelvin, kPa and J/(kg·K).
 
 **Live, scrubbable runs.** *Solve* computes in small time-budgeted slices between animation frames, so the page never freezes and the view follows the solution as it develops. Every run is recorded, so *play* replays it at a steady 60 fps (0.25×–4×) and the timeline scrubs to any moment. A few hundred Lagrangian tracer particles drift with the local velocity field during playback.
 
 **Linked probe.** Hovering any plot or the field view puts a cursor at that position in every panel and reads out ρ, u, p, M, T there.
 
-**Five classic presets.** Sod, Lax, the 1-2-3 problem, the strong shock, and the Woodward-Colella blast wave — one click each.
+**Presets.** The five classic non-dimensional problems (Sod, Lax, 1-2-3, strong shock, blast wave), plus SI cases: air 10:1 bar, He driving air (two gases, Mₛ ≈ 4.1) and hot CO₂, where γ(T) visibly matters.
 
 ---
 
@@ -134,7 +223,8 @@ See [`test.js`](test.js) for the exact tolerances and setups, and [`CONTRIBUTING
 | Riemann solver     | HLLC / HLL / Roe / Rusanov (selectable); 2D version carries tangential momentum as a passive scalar |
 | Time integration   | SSP-RK2 (two-stage, strong-stability-preserving)    |
 | Time step          | 1D: Δt = CFL · Δx / max(|u| + a). 2D: Δt = CFL · min(Δx, Δy) / max(|u| + |v| + a). Recomputed each step. |
-| Boundary conditions| Shock tube: transmissive or reflective. Nozzle: reservoir `(p₀, T₀)` inlet + static back-pressure exit (with auto sub/supersonic switch). 2D: transmissive on all four walls. |
+| Boundary conditions| Shock tube: transmissive, reflective or periodic. Nozzle: reservoir `(p₀, T₀)` inlet + static back-pressure exit (with auto sub/supersonic switch). 2D: transmissive on all four walls. |
+| Equation of state  | Ideal gas p = ρRT; calorically or thermally perfect (NASA-7 cₚ(T)); T recovered from e by Newton iteration; two gases via a transported mass fraction. Legacy non-dimensional γ-law path unchanged. |
 
 ---
 
@@ -154,33 +244,36 @@ See [`test.js`](test.js) for the exact tolerances and setups, and [`CONTRIBUTING
 
 ## Nozzle module
 
-Quasi-1D Euler in a duct with cross-section `A(x)`. The flux divergence is reused unchanged from `solver.js` (so all four Riemann solvers, MUSCL, and SSP-RK2 carry over); on top of that, `nozzle.js` adds the geometric source term, the reservoir / back-pressure boundary closures, and the isentropic analytical reference.
+Quasi-1D Euler in a duct with cross-section `A(x)`, for any gas. The flux divergence is reused unchanged from `solver.js` (so all four Riemann solvers, MUSCL, and SSP-RK2 carry over); on top of that, `nozzle.js` adds the geometric source term, the reservoir / back-pressure boundary closures, and the exact steady quasi-1D reference.
 
-**Area profiles** — three families, all with `A_throat = 1` by convention and an area ratio `AR = A_max / A_throat`:
+**Area profiles** — three analytic families with area ratio `AR = A_max / A_throat` (`A_throat = 1` non-dimensional, or `Athroat` in m²), or a table:
 
 - **Convergent** — quadratic taper from `A(0) = AR` down to `A(L) = 1`.
 - **Divergent** — quadratic flare from `A(0) = 1` out to `A(L) = AR`.
 - **CD** (convergent–divergent) — symmetric parabola with the throat at `x = L/2`.
+- **Table** — any measured or designed profile `(x, A)` from a CSV file, interpolated with monotone cubic Hermite splines (Fritsch–Carlson), so dA/dx is continuous and never overshoots.
 
 **Boundary conditions** — physically motivated rather than zero-gradient:
 
-- **Inlet:** isentropic reservoir at `(p₀, T₀)`. One characteristic leaves through a subsonic inlet, so the velocity is extrapolated from the first interior cell; the two incoming ones fix the stagnation state, giving `T = T₀ − u²/(2c_p)` and `p = p₀(T/T₀)^{γ/(γ−1)}`. Total pressure and enthalpy enter at exactly `(p₀, T₀)`, so the nozzle chokes at the theoretical mass flow once the throat reaches `M = 1`.
+- **Inlet:** isentropic reservoir at `(p₀, T₀)`. One characteristic leaves through a subsonic inlet, so the velocity is extrapolated from the first interior cell; the two incoming ones fix the stagnation state, giving `h(T) = h(T₀) − u²/2` and `p = p₀ exp((φ(T) − φ(T₀))/R)` (for a calorically perfect gas, `T = T₀ − u²/(2cₚ)` and `p = p₀(T/T₀)^{γ/(γ−1)}`). Total pressure and enthalpy enter at exactly `(p₀, T₀)`, so the nozzle chokes at the theoretical mass flow once the throat reaches `M = 1`.
 - **Exit:** static back pressure `p_b` when the exit is subsonic; full extrapolation when the exit is supersonic. The switch is driven by the local exit Mach, so a CD nozzle can transition through choked → shock-in-divergent → fully supersonic without changing the BC code.
 
-**Isentropic analytical overlay.** Inverts the `A/A*` area-Mach relation by bisection on each cell. In a CD nozzle the convergent half is always subsonic; the divergent half follows the user-selected `branch` (subsonic for a Venturi, supersonic for a fully-expanded design point). Useful as a sanity reference, but note that the analytical solution is *not* valid when a normal shock sits in the divergent section.
+**Exact quasi-1D reference** (`quasi1DSolution`). For any gas, the steady solution is built from the isentrope `u = √(2(h₀ − h))`, mass flux `G = ρu` and its sonic maximum `G*`. From the back pressure it picks the regime: unchoked (A* from the exit pressure), choked with a **normal shock** located by matching the exit pressure behind it (real-gas Rankine–Hugoniot), or shock-free supersonic. The numerical shock lands within two cells of it, and ṁ agrees to ~0.06% in choked flow. In weakly unchoked, low-Mach flow the steady ṁ is very sensitive to the exit pressure (a 0.2% pressure difference moves it ~3% at N = 300), so use the GCI study to put an error bar on it.
 
 ### Nozzle test problems
 
-| Preset             | Type       | AR  | p_b  | branch     | Notes |
-|--------------------|------------|-----|------|------------|-------|
-| Subsonic CD        | CD         | 2.0 | 0.97 | subsonic   | Venturi regime, isentropic acceleration then deceleration. |
-| Choked CD          | CD         | 2.0 | 0.93 | subsonic   | Throat at M = 1, a weak shock just past it, then subsonic recompression. |
-| Normal Shock       | CD         | 2.0 | 0.75 | subsonic   | Shock stands inside the divergent section. |
+| Preset             | Type       | AR  | p_b / p₀ | Regime (exact) | Notes |
+|--------------------|------------|-----|----------|----------------|-------|
+| Subsonic CD        | CD         | 2.0 | 0.97 | unchoked | Venturi regime, isentropic acceleration then deceleration. |
+| Choked CD          | CD         | 2.0 | 0.93 | normal shock | Throat at M = 1, a weak shock just past it, then subsonic recompression. |
+| Normal Shock       | CD         | 2.0 | 0.75 | normal shock | Shock stands at x ≈ 0.816 L in the divergent section. |
 | Full Supersonic CD | CD         | 2.0 | 0.09 | supersonic | Design-point expansion to M ≈ 2.2 at the exit. |
-| Convergent         | convergent | 3.0 | 0.60 | subsonic   | Pure acceleration up to (at most) sonic at the exit. |
+| Convergent         | convergent | 3.0 | 0.60 | unchoked | Accelerates to M ≈ 0.89 at the exit. |
 | Divergent          | divergent  | 2.5 | 0.10 | supersonic | Supersonic expansion from a sonic inlet plenum. |
+| Air tunnel M2 (SI) | CD         | 1.6875 | 0.08 | supersonic | Thermally perfect air, p₀ = 300 kPa, T₀ = 300 K, A_t = 10 cm², M = 2 test section. |
+| Hot exhaust CH₄–air (SI) | CD   | 4.0 | 0.05 | supersonic | Frozen combustion products, p₀ = 20 bar, T₀ = 2200 K: γ(T) matters. |
 
-Stagnation conditions are `p₀ = 1`, `T₀ = 1` (non-dimensional, R = 1), γ = 1.4, `N = 300`, `L = 1` for every preset.
+The non-dimensional presets use `p₀ = 1`, `T₀ = 1` (R = 1), γ = 1.4, `N = 300`, `L = 1`.
 
 ---
 
@@ -207,14 +300,21 @@ The 2D UI (`index2d.html`) is the parallel page to the shock-tube lab: a canvas 
 
 ```
 cfdsolver/
-├── index.html          1D UI: shock tube + nozzle (React via Babel-standalone, canvas)
+├── index.html          1D UI: shock tube, nozzle, facility, verify (React via Babel-standalone, canvas)
 ├── index2d.html        2D UI: heatmap + line-outs along movable cuts
 ├── labui.js            Shared UI layer: playback engine, canvas plots, controls (no math)
 ├── lab.css             Shared workspace stylesheet
-├── solver.js           1D shock-tube math: fluxes, MUSCL, SSP-RK2, exact Riemann
-├── nozzle.js           Quasi-1D nozzle math: area source, reservoir + back-pressure BCs,
-│                       isentropic A/A* overlay. Builds on solver.js's flux machinery.
+├── gas.js              Gas models in SI: NASA-7 thermo, mixtures, isentropes, stagnation states
+├── solver.js           1D Euler math: EOS adapters, fluxes, MUSCL, SSP-RK2, exact Riemann (ideal + real gas)
+├── nozzle.js           Quasi-1D nozzle: area source, tabulated A(x), reservoir + back-pressure BCs,
+│                       exact quasi-1D solution. Builds on solver.js's flux machinery.
+├── facility.js         Shock-tube facility analysis: incident / reflected shocks, tailoring, test time
+├── case.js             Case files (JSON), batch runs, CSV — shared by the UI and run.js
+├── run.js              Headless command-line runner (node run.js case.json …)
+├── verify.js           Order-of-accuracy studies and grid convergence index (GCI)
 ├── solver2d.js         2D Cartesian Euler: 2D-aware HLLC/HLL/Roe/Rusanov, MUSCL, SSP-RK2
+├── cases/              Example case files and an area-profile CSV
+├── validation/         Sajben diffuser harness (experimental data to be added)
 ├── test.js             Zero-dependency Node verification suite (see Validation)
 ├── CONTRIBUTING.md     Contribution guide (the buildless / no-dependency rule)
 ├── LICENSE             MIT
@@ -223,13 +323,24 @@ cfdsolver/
 └── README.md           This file
 ```
 
-`solver.js`, `nozzle.js`, and `solver2d.js` know nothing about the DOM. The HTML files know nothing about HLLC. They communicate through plain JS globals. `labui.js` is UI-only too: it drives any solver through `init` / `advance` / `stableDt` callbacks and knows nothing about the equations. `nozzle.js` depends on `solver.js` (it reuses `primToCons`, `FLUXES`, `computeRhs`, `stableDt`, and `extract`), so in the browser `solver.js` must be loaded first; in Node, `nozzle.js` requires it itself. `solver2d.js` is self-contained — it does not import `solver.js`.
+The math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). `labui.js` is UI-only too: it drives any solver through `init` / `advance` / `stableDt` callbacks and knows nothing about the equations. In the browser the load order is `gas.js → solver.js → nozzle.js → facility.js → case.js → verify.js`; in Node each file `require`s what it needs. `solver2d.js` is self-contained.
 
 ---
 
 ## Programmatic API
 
-Both `solver.js` and `nozzle.js` export everything as browser globals and as CommonJS modules.
+Every math file exports everything as browser globals and as CommonJS modules. Real-gas runs take a gas model from `gas.js`:
+
+```js
+const G = require("./gas"), S = require("./solver");
+const air = G.gasModel("air");                         // or gasModel("air", "calorically-perfect")
+let s = S.initState({ N: 400, L: 1, cfl: 0.4, diaphragm: 0.5, bcType: "transmissive", flux: "HLLC",
+                      gas: air, leftState: { p: 1e6, T: 300, u: 0 }, rightState: { p: 1e5, T: 300, u: 0 } });
+s = S.stepUntil(s, 6e-4);                              // SI: seconds
+const sol = S.extract(s);                              // T [K], e, s [J/(kg K)], gamma, ...
+const ex  = S.exactRiemannGas(air, { p: 1e6, T: 300, u: 0 }, air, { p: 1e5, T: 300, u: 0 }, 0.5, 6e-4, sol.x);
+// two gases: replace `gas` by gasLeft: G.gasModel("He"), gasRight: air
+```
 
 ### Shock tube
 
@@ -281,22 +392,33 @@ const params = {
 let state = Z.initNozzleState(params);
 state = Z.nozzleStepUntil(state, 20);            // march to steady state
 
-const sol   = Z.extractNozzle(state);            // adds pt (total pressure) and A(x)
-const ideal = Z.isentropicSolution(state, "supersonic");
+const sol   = Z.extractNozzle(state);            // adds pt (total pressure), A(x), mdot
+const exact = Z.quasi1DSolution(state, "auto");  // regime, xShock, M, p, T, ... for any gas
+// SI: add gas: require("./gas").gasModel("air"), Athroat: 1e-3 (m²), p0 in Pa, T0 in K
+// tabulated: type: "table", areaTable: { x: [...], A: [...] }
 ```
 
 Public surface:
 
-- `nozzleArea(x, L, AR, type)` / `nozzleAreaDeriv(...)` — the three area profiles `"convergent" | "divergent" | "CD"` and their derivatives.
-- `buildAreaArrays(N, dx, L, AR, type)` — precomputed `A` and `dA/dx` on the ghosted grid.
-- `computeNozzleRhs(ρ, m, E, N, Δx, γ, fluxFn, A, dA)` — flux divergence plus the geometric source.
-- `applyNozzleInletBC(ρ, m, E, γ, p₀, T₀)` — reservoir closure: extrapolated velocity, stagnation `(p₀, T₀)` held fixed.
-- `applyNozzleExitBC(ρ, m, E, γ, p_b, N)` — back-pressure / supersonic-extrapolation switch.
+- `nozzleArea(x, L, AR, type)` / `nozzleAreaDeriv(...)` — the three analytic profiles `"convergent" | "divergent" | "CD"` and their derivatives.
+- `makeAreaTable(xs, As)` / `nozzleGeometry(params)` / `nozzleAreaAt(state, x)` — tabulated (PCHIP) and general area functions.
+- `buildAreaArrays(N, dx, L, AR, type, geom?)` — precomputed `A` and `dA/dx` on the ghosted grid.
+- `computeNozzleRhs(ρ, m, E, N, Δx, eos, fluxFn, A, dA)` — flux divergence plus the geometric source.
+- `applyNozzleInletBC(ρ, m, E, state)` — reservoir closure: extrapolated velocity, stagnation `(p₀, T₀)` held fixed.
+- `applyNozzleExitBC(ρ, m, E, state)` — back-pressure / supersonic-extrapolation switch.
 - `initNozzleState(params)` / `nozzleStepUntil(state, tTarget)` — drive the nozzle simulation.
-- `extractNozzle(state)` — primitives + derived fields, *plus* `pt` (total pressure) and `A(x)`.
-- `areaMachRelation(M, γ)` and `machFromAreaRatio(AR, γ, supersonic)` — the A/A* relation and its bisection inverse.
-- `isentropicSolution(state, "subsonic" | "supersonic")` — analytical isentropic profile for overlay.
-- `NOZZLE_PRESETS` — the six regimes tabulated above.
+- `extractNozzle(state)` — primitives + derived fields, *plus* `pt` (total pressure), `A(x)` and `mdot`.
+- `quasi1DSolution(state, "auto" | "subsonic" | "supersonic")` — exact steady quasi-1D solution (any gas, incl. normal shock); `isentropicSolution` is the old name.
+- `areaMachRelation(M, γ)` and `machFromAreaRatio(AR, γ, supersonic)` — the calorically perfect A/A* relation and its inverse.
+- `NOZZLE_PRESETS` — the regimes tabulated above.
+
+### Gases, facility, cases, verification
+
+- `gas.js`: `GASES`, `gasModel(name, model)`, `caloricallyPerfect(gas)`, `mixGases(A, B, Y)`, `gasE / gasGamma / gasSound`, `gasTfromE / gasTfromH`, `gasIsentropeT`, `gasStagnation`, `gasStaticFromStagnation`.
+- `solver.js` (additions): `idealEos / gasEos / binaryEos`, `stableDt(state)`, `riemannGasSolve(gasL, left, gasR, right)` (star state + wave pattern), `exactRiemannGas(...)`; `applyBcs` gains `"periodic"`.
+- `facility.js`: `facilityAnalysis(cfg)`, `facilityDesignP4(cfg, Ms)`, `facilitySimParams(cfg, N)`, `FACILITY_PRESETS`.
+- `case.js`: `normalizeCase`, `caseToParams`, `runCase(case, onProgress)`, `fieldsToCSV`, `tableToCSV`.
+- `verify.js`: `gci3(f1, f2, f3, h1, h2, h3)`, `observedOrder(hs, errs)`, `orderStudy(name, Ns)`, `gciStudy(name, Ns)` (and `*Gen` generator versions for time-sliced UIs).
 
 ### 2D
 
@@ -336,8 +458,9 @@ Public surface:
 
 | Control            | What it does                                                                  |
 |--------------------|-------------------------------------------------------------------------------|
-| Preset buttons     | Load a canonical Riemann problem.                                             |
-| Left / Right state | ρ, u, p on each side of the diaphragm.                                        |
+| Preset buttons     | Load a canonical problem (solves immediately).                               |
+| Gas / model        | Ideal γ (non-dimensional) or a real gas in SI; thermally or calorically perfect. |
+| Left / Right state | ρ, u, p (non-dimensional) or p, T, u (SI) on each side of the diaphragm.      |
 | γ, CFL, N, t_end, L, x₀ | Numerics and domain.                                                     |
 | Flux               | Pick which approximate Riemann solver feeds the finite-volume update.         |
 | BCs                | Transmissive (zero-gradient) or reflective (wall).                            |
@@ -350,6 +473,8 @@ Public surface:
 | Timeline / speed   | Scrub to any moment; playback at 0.25×–4×.                                    |
 | Hover              | Linked probe cursor across the field view and every plot.                     |
 | ? button / key     | Help panel with the keyboard shortcuts.                                       |
+| Save / Load case   | JSON case file; runs unchanged with `node run.js`.                            |
+| Export CSV         | Fields at the current time (plus end-wall histories, study tables, 2D snapshots). |
 
 ---
 
@@ -362,6 +487,12 @@ The choice of methods follows Toro's and Anderson's textbooks closely:
 - A. Harten, "High resolution schemes for hyperbolic conservation laws," *J. Comp. Phys.*, 49, 1983 — the entropy fix on the Roe solver.
 - C.-W. Shu and S. Osher, "Efficient implementation of essentially non-oscillatory shock-capturing schemes," *J. Comp. Phys.*, 77, 1988 — SSP-RK time integration.
 - G. A. Sod, "A survey of several finite difference methods for systems of nonlinear hyperbolic conservation laws," *J. Comp. Phys.*, 27, 1978 — the Sod test problem.
+- B. J. McBride, S. Gordon, M. A. Reno, "Coefficients for Calculating Thermodynamic and Transport Properties of Individual Species," NASA TM-4513, 1993 — the NASA-7 thermodynamic data.
+- I. B. Celik, U. Ghia, P. J. Roache, C. J. Freitas, H. Coleman, P. E. Raad, "Procedure for Estimation and Reporting of Uncertainty Due to Discretization in CFD Applications," *J. Fluids Eng.*, 130, 078001, 2008 — the GCI procedure.
+- A. G. Gaydon, I. R. Hurle, *The Shock Tube in High-Temperature Chemical Physics*, Chapman & Hall, 1963 — reflected-shock theory and tailoring.
+- R. Abgrall, "How to prevent pressure oscillations in multicomponent flow calculations: a quasi conservative approach," *J. Comp. Phys.*, 125, 1996 — the two-gas interface artefact.
+- P. Glaister, "An approximate linearised Riemann solver for the Euler equations for real gases," *J. Comp. Phys.*, 74, 1988 — the exact Roe linearisation for general EOS (here approximated).
+- F. N. Fritsch, R. E. Carlson, "Monotone Piecewise Cubic Interpolation," *SIAM J. Numer. Anal.*, 17, 1980 — the area-table interpolation.
 
 ---
 
@@ -369,14 +500,13 @@ The choice of methods follows Toro's and Anderson's textbooks closely:
 
 The lab is deliberately small and pedagogical. A non-exhaustive list of things it does *not* do (and could):
 
-- Higher-order reconstruction (PPM, WENO5, MP5).
-- Other source terms (gravity, friction, cylindrical / spherical 1D — the quasi-1D area source is already in `nozzle.js`).
-- Real-gas equations of state, multi-species, or reactive flow.
-- 3D, unstructured / curvilinear grids, AMR.
-- Reflective / periodic / inflow BCs for the 2D module (currently transmissive only).
-- Convergence studies / order-of-accuracy plots against the exact Riemann, isentropic reference, or Sedov self-similar solution.
-- Probes with time-history recording and a scrub bar.
-- Custom-preset save/load and CSV/JSON export of the solution.
-- Unsteady nozzle scenarios (back-pressure ramps, starting-shock transients).
+- Experimental validation data: the Sajben harness is in place but the NPARC files still need to be added.
+- Chemistry: equilibrium or finite-rate composition (dissociation above ~2500 K), not just frozen mixtures.
+- Higher-order reconstruction (PPM, WENO5, MP5) and more limiters.
+- Other source terms (friction / Fanno, heat addition / Rayleigh, gravity, cylindrical / spherical 1D).
+- Quasi-conservative two-gas formulation (removes the interface pressure blip).
+- Real gases and solid-wall / inflow BCs in the 2D module (currently non-dimensional and transmissive only).
+- 3D, unstructured / curvilinear grids, AMR, viscous terms and boundary layers (shock-tube test-time attenuation).
+- Nozzle design outputs (thrust, Isp, C_F), back-pressure ramps and a method-of-characteristics contour generator.
 
 PRs and forks welcome.

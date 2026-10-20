@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Project guidance for a compressible Euler CFD laboratory supporting **1D shock tube, quasi-1D nozzle, and 2D Cartesian** finite-volume simulations. This file orients Claude when reading, modifying, or extending the codebase.
+Project guidance for a compressible Euler CFD laboratory supporting **1D shock tube, quasi-1D nozzle, shock-tube facility design, and 2D Cartesian** finite-volume simulations, with real gases in SI units, case files, a CLI runner and verification tooling. This file orients Claude when reading, modifying, or extending the codebase.
 
 The numerical framework follows the structure laid out in *Write Your First CFD Solver* by Tom-Robin Teschner (CFD.University, 2024), realized here as a browser-based JavaScript port. When in doubt about a method's intent, that book — together with Toro's *Riemann Solvers* and Anderson's *Modern Compressible Flow* — is the canonical reference.
 
@@ -11,8 +11,8 @@ The numerical framework follows the structure laid out in *Write Your First CFD 
 **Do not add a build step, bundler, package manager install, transpile step, or framework migration.** This is the single most important constraint.
 
 - The pages (`index.html`, `index2d.html`) load React, ReactDOM, and Babel-standalone from a CDN (exact versions pinned), then `labui.js` and the solver `.js` files, then render. Open the HTML in a browser and it runs. There is no `npm install`, no `node_modules` in the runtime path, no CMake, no webpack/vite.
-- The solver math (`solver.js`, `nozzle.js`, `solver2d.js`) is plain, ES5-compatible JavaScript with **no imports and no third-party libraries**. Each file exposes browser globals *and* a CommonJS `module.exports` so it can be `require`d from Node for headless runs and tests.
-- The test suite (`test.js`) and CI use **only Node's built-in modules** (`assert`). No test framework, no dev-dependencies.
+- The math (`gas.js`, `solver.js`, `nozzle.js`, `facility.js`, `verify.js`, `solver2d.js`) and the driver layer (`case.js`) are plain JavaScript with **no third-party libraries** (only each other). Each file exposes browser globals *and* a CommonJS `module.exports` so it can be `require`d from Node for headless runs and tests.
+- The test suite (`test.js`), the CLI (`run.js`) and `validation/` use **only Node's built-in modules**. No test framework, no dev-dependencies.
 - If a dependency ever seems genuinely warranted, **flag it and make the case first** — the default answer is "keep it vanilla." See `CONTRIBUTING.md`.
 
 Everything below assumes this constraint.
@@ -30,9 +30,10 @@ A second-order, explicit, finite-volume solver for the compressible Euler equati
 
 - **1D conserved state:** `U = [ρ, ρu, E]ᵀ`, flux `F = [ρu, ρu² + p, u(E+p)]ᵀ`
 - **2D conserved state:** `U = [ρ, ρu, ρv, E]ᵀ`, fluxes `F` (x-direction) and `G` (y-direction)
-- **Closure:** ideal gas, `p = (γ−1)(E − ½ρ‖u‖²)`, γ = 1.4 unless overridden
+- **Closure (1D):** ideal gas `p = ρRT` with an equation-of-state adapter (§3): the legacy non-dimensional γ-law (`p = (γ−1)(E − ½ρu²)`, R = 1), or a `gas.js` model in SI — calorically perfect (cₚ fixed) or thermally perfect (cₚ(T) from NASA-7 polynomials, so γ = γ(T)) — or two gases with a transported mass fraction Y (row `ρY`). T is recovered from e by Newton iteration.
+- **Closure (2D):** non-dimensional γ-law only.
 - **Source term `H`:** zero for the shock tube and the 2D solver. The **quasi-1D nozzle** (`nozzle.js`) adds a geometric area source `H = -(1/A)(dA/dx)·[ρu, ρu², u(E+p)]`. That is the only source term in the codebase.
-- **Inviscid only.** No viscous terms, no turbulence model, no reactions.
+- **Inviscid only.** No viscous terms, no turbulence model, no reactions. Gas composition is **frozen** (no dissociation): fine to ~2500 K, increasingly wrong above.
 
 The solver is meant to be educationally clear first, optimized second. Favor readability over micro-optimization unless a measurable hot path is identified (the 2D inner loop is the one place where reusing preallocated buffers matters — see §3).
 
@@ -43,7 +44,7 @@ The solver is meant to be educationally clear first, optimized second. Favor rea
 Every operation belongs to one of three phases. **Preserve this separation** when editing or adding features.
 
 ### Pre-processing (runs once)
-1. Read parameters (from the UI or a params object)
+1. Read parameters (from the UI, a params object, or a JSON case via `case.js`); resolve gas names to `gas.js` models
 2. Allocate memory (ghosted arrays)
 3. Build the mesh / area profile
 4. Initialize the solution (`initState` / `initNozzleState` / `initState2D`)
@@ -60,7 +61,7 @@ Every operation belongs to one of three phases. **Preserve this separation** whe
 
 ### Post-processing (runs once)
 1. Extract final primitive + derived fields (`extract` / `extractNozzle` / `extract2D`)
-2. Render (canvas heatmap / SVG plots). No file output — see §9.
+2. Render (canvas fields and plots); optionally write CSV / JSON — see §9.
 
 If a feature doesn't fit cleanly into one of these slots, that's a signal to re-think where it belongs.
 
@@ -71,20 +72,29 @@ If a feature doesn't fit cleanly into one of these slots, that's a signal to re-
 ### Actual file layout
 ```
 cfdsolver/
-├── index.html      1D UI: shock tube + nozzle workspaces (React via Babel-standalone, canvas)
+├── index.html      1D UI: shock tube, nozzle, facility, verify workspaces (React via Babel-standalone, canvas)
 ├── index2d.html    2D UI: heatmap + line-outs along movable cuts
 ├── labui.js        Shared UI layer: Player (time-budgeted compute + playback), canvas
 │                   plots, controls. Plain JS + React.createElement, no math, no JSX
 ├── lab.css         Shared workspace stylesheet (colour tokens on :root)
-├── solver.js       1D shock-tube math: fluxes, MUSCL, SSP-RK2, exact Riemann
-├── nozzle.js       Quasi-1D nozzle math: area source, reservoir + back-pressure BCs,
-│                   isentropic A/A* overlay. Reuses solver.js's flux machinery.
+├── gas.js          Gas models in SI: NASA-7 thermo, mixtures, T(e)/T(h), isentropes, stagnation
+├── solver.js       1D Euler math: EOS adapters, fluxes, MUSCL, SSP-RK2, exact Riemann (ideal + real gas)
+├── nozzle.js       Quasi-1D nozzle math: area source, PCHIP area tables, reservoir + back-pressure
+│                   BCs, exact quasi-1D solution. Reuses solver.js's flux machinery.
+├── facility.js     Shock-tube facility analysis (incident/reflected shock, tailoring, test time)
+├── case.js         Driver layer: JSON cases → params → run → CSV. Shared by the UI and run.js
+├── run.js          Headless CLI: node run.js case.json [--set] [--sweep] [--area]
+├── verify.js       Order-of-accuracy studies, Celik et al. GCI; runs as generators
 ├── solver2d.js     2D Cartesian Euler: 2D-aware HLLC/HLL/Roe/Rusanov, MUSCL, SSP-RK2
+├── cases/          Example case files
+├── validation/     Sajben diffuser harness (experimental data not yet added — never fake it)
 ├── test.js         Zero-dependency Node verification suite
 └── docs/           Screenshot/GIF capture guide + suggested repo metadata
 ```
 
-**Separation of concerns (do not break this):** the `.js` math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). `nozzle.js` reuses `solver.js` globals (`primToCons`, `FLUXES`, `computeRhs`, `stableDt`, `extract`), so in the browser `solver.js` must load **before** `nozzle.js`. `solver2d.js` is self-contained. `labui.js` is UI-only: the pages hand its `Player` plain callbacks (`init`, `advance` = `stepUntil*`, `stableDt`, `record`, `check`), so it never touches the equations. Shared UI code lives there as plain JS (not JSX) because Babel-standalone can't fetch external JSX over `file://`.
+**Separation of concerns (do not break this):** the `.js` math files know nothing about the DOM; the HTML files know nothing about HLLC. They communicate through plain JS globals (and CommonJS exports for Node). Browser load order: `labui.js`, then **`gas.js → solver.js → nozzle.js → facility.js → case.js → verify.js`**; each file uses the globals of the ones before it. In Node every file `require`s what it needs through a guarded `if (typeof X === "undefined" && typeof require === "function") { var … }` block at its top (§8.9). `solver2d.js` is self-contained.
+
+**Equation-of-state adapters (`solver.js`).** Every 1D flux / RHS function takes an `eos` argument that is either a **number γ** (legacy non-dimensional path — keep it bit-identical; `test.js` and the presets depend on it) or an adapter from `idealEos(γ)`, `gasEos(gas)` or `binaryEos(gasA, gasB)` exposing `prim(ρ, ρu, E, ρY) → {u, p, a, T, gamma, R}` and `cons(ρ, u, p, Y)`. Never compute `p` from `E` with a γ formula outside the adapters. `labui.js` is UI-only: the pages hand its `Player` plain callbacks (`init`, `advance` = `stepUntil*`, `stableDt`, `record`, `check`), so it never touches the equations. Shared UI code lives there as plain JS (not JSX) because Babel-standalone can't fetch external JSX over `file://`.
 
 Keep the time-stepping loop visible and linear, top-to-bottom like prose. Helper functions are fine; deep class hierarchies are not. This is the book's deliberately flat style, kept for the same pedagogical reason.
 
@@ -143,6 +153,7 @@ Composite conditions in this codebase:
 | BC type             | Where | Normal vel. | Tangential vel. | ρ, p, E |
 |---------------------|-------|-------------|-----------------|---------|
 | Transmissive (open) | 1D shock tube, all 2D walls | Neumann | Neumann | Neumann |
+| Periodic            | 1D shock tube (`"periodic"`) | wrap | wrap | wrap |
 | Reflective / inviscid wall | 1D shock tube option | Dirichlet (0) | Neumann | Neumann |
 | Reservoir inlet     | nozzle | extrapolated from interior | — | isentropic from `(p₀, T₀)` |
 | Back-pressure / supersonic outlet | nozzle | Neumann | — | `p_b` (subsonic) or full extrapolation (supersonic) |
@@ -188,8 +199,14 @@ Every change to numerics or boundary handling must reproduce these before mergin
 
 The exact Sod solution is implemented (`exactRiemann`, Toro Ch. 4) and used both as the UI's dashed overlay and as the accuracy check in `test.js`.
 
+### Real gases and two gases
+`exactRiemannGas` must reproduce `exactRiemann` for a calorically perfect R = 1, cₚ = 3.5 gas (all five presets, 5×10⁻⁵), and the calorically perfect limit must reproduce the closed-form normal-shock relations. Numerics: thermally perfect air and two-gas He → air vs exact, with every flux, conserving mass and energy.
+
 ### Nozzle verification
-The six `NOZZLE_PRESETS` (Subsonic CD, Choked CD, Normal Shock, Full Supersonic CD, Convergent, Divergent) cover the regimes; compare against the `isentropicSolution` overlay where no shock is present. The total-pressure plot dropping across a shock is the key qualitative check.
+The `NOZZLE_PRESETS` (six non-dimensional regimes plus two SI cases) are compared against `quasi1DSolution` — the exact steady quasi-1D solution for any gas, including the normal-shock position. The total-pressure plot dropping across a shock is the key qualitative check.
+
+### Facility verification
+In the calorically perfect limit `facilityAnalysis` must reproduce the shock-tube equation, p₅/p₂ and the Mr–Mₛ relation (Gaydon & Hurle; Anderson Ch. 7) to 10⁻⁶; the two-gas simulation must match the reflection time, p₅ and T₅ to < 1%.
 
 ### 2D verification
 
@@ -200,8 +217,11 @@ The six `NOZZLE_PRESETS` (Subsonic CD, Choked CD, Normal Shock, Full Supersonic 
 | **Sedov blast** | point energy deposition, ambient p = 10⁻⁴ | Positivity at extreme ratios. |
 | **Kelvin–Helmholtz** | shear layer with small perturbation | Sensitive to numerical dissipation; good scheme comparator. |
 
-### Convergence study
-Run Sod at N = 100, 200, 400, 800 and verify the L1 density error drops at the expected order (~1 for constant + Euler-time, ~2 for MUSCL + RK2). **Order recovery is the strongest evidence the solver is correct.** `test.js` checks the error is below a bound at N=800 and decreases under refinement.
+### Convergence study and GCI (`verify.js`, Verify tab)
+**Design order must be measured on a smooth problem**: the periodic density wave (`"smooth-advection"`) reaches L1 order ≈ 1.9 (2 by design; minmod clips extrema, so L∞ ≈ 1.3). Sod converges at L1 ≈ 0.85 for *any* scheme because of its discontinuities — it is a correctness check, not an order test. Solution verification uses the three-grid GCI of Celik et al. (2008); `test.js` checks that the GCI bands contain the exact answer for the nozzle shock position and the real-gas plateau density.
+
+### Experimental validation
+`validation/sajben.js` compares the quasi-1D nozzle with the Sajben diffuser wall pressures. The NPARC data files are **not** in the repo; the script skips until they are added. Never commit invented or "representative" experimental numbers.
 
 ---
 
@@ -219,24 +239,29 @@ If you suspect a bug, check these first.
 8. **Allocating inside the 2D time loop.** The buffers in `initState2D` are reused deliberately; new allocations each step tank performance.
 9. **Loading `nozzle.js` before `solver.js` in the browser.** It reuses solver globals and will throw `ReferenceError` otherwise, so script order matters. In Node, `nozzle.js` `require`s `./solver` itself (the `var` block at its top). Only alias solver.js *function declarations* there, and only with `var`: `const` would collide with the browser globals, and so would `var FLUXES`, because solver.js declares `FLUXES` with `const` (nozzle.js reads it through `_fluxTable()` instead). Load both pages in a browser after touching this block.
 10. **Assuming `extract`/`extract2D` return ghosted arrays.** They return interior-only fields for display; the raw ghosted state lives on the state object (`rho`/`mom`/`ene`).
+11. **Assuming ρe = p/(γ−1) with a gas model.** SI energies carry an enthalpy reference offset (e(298 K) = −RT). Roe's entropy-wave eigenvector needs dE/dρ|ₚ = u²/2 + (h − cₚT), and its species wave de/dY|ρ,ₚ; dropping them made Roe blow up. Any new flux must work through `eos.prim`.
+12. **`const` name collisions across browser scripts.** All page scripts share one global lexical scope: a top-level `const` reused in two files (or `var X` where another file has `const X`) kills the page with a SyntaxError. Give module constants distinctive names; alias only *function declarations* with `var`. Load both pages in a browser after adding a file.
+13. **Mutating arrays that the UI memoises.** `PlotCard` memoises on array identity; append by building a new array (`concat`), never `push` into one already passed to a plot.
+14. **Two-gas interface blip.** Conservative multi-gas schemes produce a few-percent spurious pressure oscillation where the driver/driven interface is smeared (Abgrall 1996). It is a known artefact, documented in the UI; don't "fix" it by tuning, and don't mistake it for a tailoring wave.
+15. **Frozen chemistry.** Above ~2500 K real gases dissociate; the frozen gas models over-predict T. The UI warns; presets stay below it.
 
 ---
 
 ## 9. Output and post-processing
 
-There is **no file output** — this is an interactive browser tool, not a batch solver.
+File output is **CSV and JSON only**, and lives outside the math files: the UI writes case files and CSV through `case.js` + `labui.js` download helpers; `run.js` writes field CSVs, reference-solution CSVs, probe histories, sweep tables and summary JSON.
 - **1D (`index.html`):** a canvas "inside the tube" strip (density / schlieren / pressure / Mach) plus canvas line plots (ρ, u, p, e and derived M, T, s, a), with the exact/isentropic reference drawn as a dashed overlay. Playback advects Lagrangian tracer particles. The nozzle adds ṁ(x) and a steady-state convergence (residual) plot.
 - **2D (`index2d.html`):** a canvas heatmap (density / schlieren / pressure / Mach) rendered via `ImageData`, plus line-outs along two cuts the user places by clicking.
 - **Runs are recorded and replayable.** `LabUI.Player` computes in ~10 ms slices per animation frame (never blocking the page), records a frame each time the solution passes the next multiple of `t_end / maxFrames`, and plays them back at a steady rate with a scrubbable timeline. It never clips a step to land on a frame time — that would add a sliver step per frame.
 - For headless/batch work, `require` the solver from Node and read the arrays from `extract*` directly (see the README's Programmatic API and `test.js`).
 
-If you add export (CSV/JSON/PNG), it belongs in the UI layer, not the math files.
+New export formats belong in `case.js` / the UI layer, not the math files.
 
 ---
 
 ## 10. Style and conventions
 
-- **No build, no dependencies** (see §0). Solver files stay ES5-compatible plain JS with browser-global + CommonJS dual export.
+- **No build, no dependencies** (see §0). Math files stay plain script JavaScript (ES2015+ syntax is fine: `const`, arrows, generators — but no `import`/`export`, no transpile) with browser-global + CommonJS dual export.
 - **Variable naming:** physical quantities use their symbols (`rho`, `u`, `v`, `p`, `E`, `gamma`, `cfl`); loop indices `i, j, k`; wave speeds `SL, SR, sStar`. Readers of Toro/Teschner should be able to scan the code.
 - **Comments** point at the *equation reference* (`// Toro Eq. 10.37: contact speed`) rather than restating the code.
 - **Magic numbers:** every numerical constant gets a name (`gamma`, `cfl`, `eps = 1e-8/1e-12`). No bare floats mid-expression.
@@ -253,8 +278,15 @@ Already shipped: HLL, HLLC, Roe, Rusanov; SSP-RK2; the quasi-1D nozzle with area
 - [ ] WENO5 reconstruction. Needs a lower-order fallback for the two boundary-adjacent cells. Significantly more involved.
 - [ ] Reflective / periodic / inflow BCs for the 2D module (currently transmissive only).
 - [ ] More nozzle source terms (cylindrical/spherical 1D reuse the same geometric-source machinery).
-- [ ] Convergence-study / order-of-accuracy tooling beyond the single `test.js` check.
-- [ ] Solution export (CSV/JSON/PNG) from the UI.
+- [x] Real gases (calorically / thermally perfect), SI units, two-gas shock tubes.
+- [x] Case files, CSV export, headless CLI with sweeps.
+- [x] Order-of-accuracy studies and GCI.
+- [x] Shock-tube facility analysis.
+- [ ] Sajben experimental comparison — harness ready, data files to be added by the maintainer.
+- [ ] Equilibrium / finite-rate chemistry (frozen composition only today).
+- [ ] Fanno (friction) and Rayleigh (heat addition) source terms.
+- [ ] Quasi-conservative two-gas formulation (removes the interface blip).
+- [ ] Nozzle design outputs (thrust, Isp, C_F), back-pressure ramps, MOC contours.
 - [ ] Adaptive mesh refinement (AMR). Major rewrite; only after the above are solid.
 - [ ] Viscous terms (Navier–Stokes). Separate diffusive flux; more restrictive CFL.
 
