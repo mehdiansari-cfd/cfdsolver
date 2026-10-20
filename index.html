@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#15181d">
 <title>Euler Lab</title>
 <meta name="description" content="A browser-based laboratory for compressible flow: shock tubes, nozzles, shock-tube facilities and 2D fields, with real gases, exact solutions and validation against experiment.">
 <script>
@@ -11,7 +12,7 @@
   // Apply a saved light / dark choice before first paint (otherwise the system setting decides).
   try { var t = localStorage.getItem("eulerlab-theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
 </script>
-<link rel="stylesheet" href="lab.css">
+<link rel="stylesheet" href="lab.css?v=20261020">
 <style>
   /* Landing-page layout; colours, type and controls come from lab.css. */
   body { font-size: 15px; }
@@ -32,7 +33,7 @@
   h1 em { font-style: normal; color: var(--accent); }
   .lede { font-size: 17px; line-height: 1.6; color: var(--muted); margin: 0 0 30px; max-width: 34em; }
   .cta { display: flex; flex-wrap: wrap; gap: 10px; }
-  .cta .btn { height: 44px; padding: 0 22px; font-size: 15px; border-radius: 10px; }
+  .cta .btn { touch-action: manipulation; height: 44px; padding: 0 22px; font-size: 15px; border-radius: 10px; }
   .cta .btn-primary { padding: 0 26px; }
   .hint { margin-top: 18px; font-size: 13px; color: var(--muted); }
 
@@ -86,11 +87,24 @@
   @media (max-width: 520px) {
     .wrap { padding: 0 16px; }
     .site-head .right .btn-primary { display: none; }
+    .hero { padding: 28px 0 28px; gap: 28px; }
+    .eyebrow { margin-bottom: 16px; }
+    h1 { font-size: 34px; margin-bottom: 14px; }
+    .lede { font-size: 16px; margin-bottom: 22px; }
+    .cta { flex-direction: column; }
+    .cta .btn { width: 100%; height: 48px; }
+    .demo { padding: 14px; border-radius: 16px; }
+    #plot { height: 170px; }
+    .demo-foot { flex-direction: column; }
+    section.block { padding: 40px 0; }
+    .block h2 { font-size: 23px; }
+    .card { padding: 16px; }
+    pre { font-size: 12px; padding: 14px 16px; }
   }
 </style>
 <!-- Math layer only (no React): the hero animation runs the real solver. -->
-<script src="gas.js"></script>
-<script src="solver.js"></script>
+<script src="gas.js?v=20261020"></script>
+<script src="solver.js?v=20261020"></script>
 </head>
 <body>
 
@@ -227,6 +241,7 @@ node test.js</pre>
   function readColors() {
     const cs = getComputedStyle(root);
     for (const k of ["series", "ref", "grid", "axis", "tick", "stage", "plot"]) C[k] = cs.getPropertyValue("--" + k).trim();
+    document.querySelector('meta[name="theme-color"]').setAttribute("content", cs.getPropertyValue("--bg").trim());
   }
   readColors();
 

@@ -42,6 +42,8 @@ the case — the default answer is "keep it vanilla."
 
 The math layers know nothing about the DOM; the HTML knows nothing about HLLC.
 They communicate through plain JS globals (and CommonJS exports for Node).
+Local scripts and the stylesheet are linked with a version tag (`lab.css?v=20261020`). When you change any `.js` or `.css` file the pages load, bump that tag in `index.html`, `lab.html` and `index2d.html` together, so phone browsers don't keep serving a cached copy.
+
 Browser load order is `gas.js → solver.js → nozzle.js → boundary.js → facility.js → case.js → verify.js` (each uses the globals of the ones before it; in Node each file requires what it needs). After adding a script, load both pages in a browser: top-level `const` names must be unique across all of them.
 
 ## Style
